@@ -1,0 +1,4 @@
+int64 required_minutes
+---
+bool can_complete
+string message
