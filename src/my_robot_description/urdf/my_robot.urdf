@@ -45,7 +45,10 @@
     <parent link="base_link"/>
     <child link="left_wheel"/>
     <origin xyz="0 0.18 -0.05" rpy="1.5708 0 0"/>
-    <axis xyz="0 0 1"/>
+    <!-- 轴填 0 0 -1: 关节origin的 rpy=1.5708 绕X 会把本地z轴映射到世界 -Y,
+         而差速驱动约定轮子绕 +Y 正转=前进。若填 0 0 1, DiffDrive 下发的正转速
+         会让车倒着走(v和w同时反号), odom 与真实运动完全相反。 -->
+    <axis xyz="0 0 -1"/>
   </joint>
 
   <link name="right_wheel">
@@ -72,7 +75,68 @@
     <parent link="base_link"/>
     <child link="right_wheel"/>
     <origin xyz="0 -0.18 -0.05" rpy="1.5708 0 0"/>
-    <axis xyz="0 0 1"/>
+    <!-- 轴填 0 0 -1: 关节origin的 rpy=1.5708 绕X 会把本地z轴映射到世界 -Y,
+         而差速驱动约定轮子绕 +Y 正转=前进。若填 0 0 1, DiffDrive 下发的正转速
+         会让车倒着走(v和w同时反号), odom 与真实运动完全相反。 -->
+    <axis xyz="0 0 -1"/>
+  </joint>
+
+  <!-- 前后万向轮:防止底盘绕轮轴俯仰触地。
+       最低点 z=-0.095,比轮子接地面(z=-0.10)高 5mm:
+       平时不接触,由两个驱动轮独占法向载荷以保证牵引力/侧向约束;
+       只有底盘俯仰超过 atan(0.005/0.15)≈1.9° 时才接住,远早于盒子前下角触地。
+       切忌与轮子接地面共面 —— 四点共面会让法向载荷分配超静定,
+       万向轮把载荷全扛走,轮子失去侧向约束,表现为转向严重不足。 -->
+  <link name="caster_front">
+    <visual>
+      <geometry>
+        <sphere radius="0.05"/>
+      </geometry>
+      <material name="gray">
+        <color rgba="0.3 0.3 0.3 1"/>
+      </material>
+    </visual>
+    <collision>
+      <geometry>
+        <sphere radius="0.05"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="0.05"/>
+      <inertia ixx="0.00005" ixy="0" ixz="0" iyy="0.00005" iyz="0" izz="0.00005"/>
+    </inertial>
+  </link>
+
+  <joint name="caster_front_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="caster_front"/>
+    <origin xyz="0.15 0 -0.045" rpy="0 0 0"/>
+  </joint>
+
+  <link name="caster_rear">
+    <visual>
+      <geometry>
+        <sphere radius="0.05"/>
+      </geometry>
+      <material name="gray">
+        <color rgba="0.3 0.3 0.3 1"/>
+      </material>
+    </visual>
+    <collision>
+      <geometry>
+        <sphere radius="0.05"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="0.05"/>
+      <inertia ixx="0.00005" ixy="0" ixz="0" iyy="0.00005" iyz="0" izz="0.00005"/>
+    </inertial>
+  </link>
+
+  <joint name="caster_rear_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="caster_rear"/>
+    <origin xyz="-0.15 0 -0.045" rpy="0 0 0"/>
   </joint>
 
   <link name="lidar_link">
@@ -95,6 +159,17 @@
     <child link="lidar_link"/>
     <origin xyz="0.12 0 0.085" rpy="0 0 0"/>
   </joint>
+  <!-- 万向轮摩擦清零:它们是fixed joint不会滚动,有摩擦会阻碍转弯 -->
+  <gazebo reference="caster_front">
+    <mu1>0.0</mu1>
+    <mu2>0.0</mu2>
+  </gazebo>
+
+  <gazebo reference="caster_rear">
+    <mu1>0.0</mu1>
+    <mu2>0.0</mu2>
+  </gazebo>
+
   <gazebo>
     <plugin filename="gz-sim-diff-drive-system"
             name="gz::sim::systems::DiffDrive">
@@ -107,6 +182,7 @@
       <odom_topic>odom</odom_topic>
       <frame_id>odom</frame_id>
       <child_frame_id>base_link</child_frame_id>
+      <tf_topic>/tf</tf_topic>
     </plugin>
   </gazebo>
  <gazebo reference="lidar_link">
@@ -125,6 +201,8 @@
             <min_angle>-3.14159</min_angle>
             <max_angle>3.14159</max_angle>
           </horizontal>
+          <!-- 保持 16 线 ±15° 的 3D 雷达。/scan/points 出完整点云,
+               /scan (LaserScan) 只取其中水平的一行给 slam_toolbox 做 2D 建图。 -->
           <vertical>
             <samples>16</samples>
             <resolution>1</resolution>

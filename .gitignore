@@ -9,3 +9,7 @@ __pycache__/
 # Editor
 .vscode/
 
+
+*.bak
+*.posegraph
+*.posegraph.data

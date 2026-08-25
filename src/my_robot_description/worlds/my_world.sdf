@@ -101,5 +101,256 @@
       </link>
     </model>
 
+    <!-- ================= 室内房间 =================
+         内部尺寸 10m x 8m (x∈[-5,5], y∈[-4,4]), 墙厚 0.15m, 高 1.5m。
+         墙厚不能太薄: 薄墙在默认接触求解下容易被高速接触穿透。
+         两道内墙不封闭任何区域, 机器人可以绕回起点触发 slam_toolbox 闭环检测。
+         原点(出生点)周围 1.5m 内无遮挡, teleport_test.py 可原地跑完。  -->
+
+    <model name="wall_north">
+      <static>true</static>
+      <pose>0 4.075 0.75 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>10.3 0.15 1.5</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>10.3 0.15 1.5</size></box></geometry>
+          <material>
+            <ambient>0.7 0.7 0.68 1</ambient>
+            <diffuse>0.7 0.7 0.68 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="wall_south">
+      <static>true</static>
+      <pose>0 -4.075 0.75 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>10.3 0.15 1.5</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>10.3 0.15 1.5</size></box></geometry>
+          <material>
+            <ambient>0.7 0.7 0.68 1</ambient>
+            <diffuse>0.7 0.7 0.68 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="wall_east">
+      <static>true</static>
+      <pose>5.075 0 0.75 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>0.15 8.3 1.5</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>0.15 8.3 1.5</size></box></geometry>
+          <material>
+            <ambient>0.7 0.7 0.68 1</ambient>
+            <diffuse>0.7 0.7 0.68 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="wall_west">
+      <static>true</static>
+      <pose>-5.075 0 0.75 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>0.15 8.3 1.5</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>0.15 8.3 1.5</size></box></geometry>
+          <material>
+            <ambient>0.7 0.7 0.68 1</ambient>
+            <diffuse>0.7 0.7 0.68 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- 内墙: 制造走廊和拐角, 给 scan matching 提供可区分的特征 -->
+    <model name="wall_inner_a">
+      <static>true</static>
+      <pose>-2.5 -1.5 0.75 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>3.0 0.15 1.5</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>3.0 0.15 1.5</size></box></geometry>
+          <material>
+            <ambient>0.6 0.62 0.65 1</ambient>
+            <diffuse>0.6 0.62 0.65 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="wall_inner_b">
+      <static>true</static>
+      <pose>1.5 2.75 0.75 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>0.15 2.5 1.5</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>0.15 2.5 1.5</size></box></geometry>
+          <material>
+            <ambient>0.6 0.62 0.65 1</ambient>
+            <diffuse>0.6 0.62 0.65 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ================= 三维结构 =================
+         高度各不相同, 让 16 线雷达(±15°)的点云真正有立体信息。
+         雷达装在 z≈0.185m, ±15° 张角, 所以在 r 米处能覆盖的高度范围约
+         0.185 ± 0.268*r —— 3m 处约 [0, 0.99]m, 5m 处约 [0, 1.53]m。
+         下面的物体高度就是按这个覆盖范围铺开的。                        -->
+
+    <!-- 桌子: 桌面0.75m在水平线以上, 只有桌腿会进2D地图 —— 3D雷达最典型的场景 -->
+    <model name="table1">
+      <static>true</static>
+      <pose>3.5 2.5 0 0 0 0</pose>
+      <link name="link">
+        <collision name="top_col">
+          <pose>0 0 0.755 0 0 0</pose>
+          <geometry><box><size>1.2 0.8 0.05</size></box></geometry>
+        </collision>
+        <visual name="top_vis">
+          <pose>0 0 0.755 0 0 0</pose>
+          <geometry><box><size>1.2 0.8 0.05</size></box></geometry>
+          <material>
+            <ambient>0.55 0.36 0.20 1</ambient>
+            <diffuse>0.55 0.36 0.20 1</diffuse>
+          </material>
+        </visual>
+        <collision name="leg1_col">
+          <pose>0.55 0.35 0.365 0 0 0</pose>
+          <geometry><box><size>0.06 0.06 0.73</size></box></geometry>
+        </collision>
+        <visual name="leg1_vis">
+          <pose>0.55 0.35 0.365 0 0 0</pose>
+          <geometry><box><size>0.06 0.06 0.73</size></box></geometry>
+          <material><ambient>0.4 0.26 0.14 1</ambient><diffuse>0.4 0.26 0.14 1</diffuse></material>
+        </visual>
+        <collision name="leg2_col">
+          <pose>-0.55 0.35 0.365 0 0 0</pose>
+          <geometry><box><size>0.06 0.06 0.73</size></box></geometry>
+        </collision>
+        <visual name="leg2_vis">
+          <pose>-0.55 0.35 0.365 0 0 0</pose>
+          <geometry><box><size>0.06 0.06 0.73</size></box></geometry>
+          <material><ambient>0.4 0.26 0.14 1</ambient><diffuse>0.4 0.26 0.14 1</diffuse></material>
+        </visual>
+        <collision name="leg3_col">
+          <pose>0.55 -0.35 0.365 0 0 0</pose>
+          <geometry><box><size>0.06 0.06 0.73</size></box></geometry>
+        </collision>
+        <visual name="leg3_vis">
+          <pose>0.55 -0.35 0.365 0 0 0</pose>
+          <geometry><box><size>0.06 0.06 0.73</size></box></geometry>
+          <material><ambient>0.4 0.26 0.14 1</ambient><diffuse>0.4 0.26 0.14 1</diffuse></material>
+        </visual>
+        <collision name="leg4_col">
+          <pose>-0.55 -0.35 0.365 0 0 0</pose>
+          <geometry><box><size>0.06 0.06 0.73</size></box></geometry>
+        </collision>
+        <visual name="leg4_vis">
+          <pose>-0.55 -0.35 0.365 0 0 0</pose>
+          <geometry><box><size>0.06 0.06 0.73</size></box></geometry>
+          <material><ambient>0.4 0.26 0.14 1</ambient><diffuse>0.4 0.26 0.14 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- 高书架 2m: 高于雷达全部视野, 近处只能看到下半截 -->
+    <model name="shelf">
+      <static>true</static>
+      <pose>-4.2 3.0 1.0 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>0.4 1.6 2.0</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>0.4 1.6 2.0</size></box></geometry>
+          <material>
+            <ambient>0.45 0.30 0.18 1</ambient>
+            <diffuse>0.45 0.30 0.18 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- 矮台阶 0.25m: 刚好跨过雷达高度(0.185m), 2D地图里会时有时无 -->
+    <model name="platform">
+      <static>true</static>
+      <pose>-3.5 1.0 0.125 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>1.2 1.2 0.25</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>1.2 1.2 0.25</size></box></geometry>
+          <material>
+            <ambient>0.50 0.50 0.55 1</ambient>
+            <diffuse>0.50 0.50 0.55 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- 悬空横梁 z=1.2m: 完全在水平线以上, 只有上方几线扫得到, 2D地图上不该出现 -->
+    <model name="overhead_beam">
+      <static>true</static>
+      <pose>-0.5 3.0 1.2 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>2.0 0.2 0.2</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>2.0 0.2 0.2</size></box></geometry>
+          <material>
+            <ambient>0.35 0.38 0.42 1</ambient>
+            <diffuse>0.35 0.38 0.42 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- 堆叠箱: 上下两层不同尺寸, 点云里是阶梯状 -->
+    <model name="crates">
+      <static>true</static>
+      <pose>4.0 -2.5 0 0 0 0</pose>
+      <link name="link">
+        <collision name="lower_col">
+          <pose>0 0 0.3 0 0 0</pose>
+          <geometry><box><size>0.6 0.6 0.6</size></box></geometry>
+        </collision>
+        <visual name="lower_vis">
+          <pose>0 0 0.3 0 0 0</pose>
+          <geometry><box><size>0.6 0.6 0.6</size></box></geometry>
+          <material><ambient>0.72 0.58 0.32 1</ambient><diffuse>0.72 0.58 0.32 1</diffuse></material>
+        </visual>
+        <collision name="upper_col">
+          <pose>0.05 0 0.8 0 0 0.3</pose>
+          <geometry><box><size>0.4 0.4 0.4</size></box></geometry>
+        </collision>
+        <visual name="upper_vis">
+          <pose>0.05 0 0.8 0 0 0.3</pose>
+          <geometry><box><size>0.4 0.4 0.4</size></box></geometry>
+          <material><ambient>0.66 0.50 0.26 1</ambient><diffuse>0.66 0.50 0.26 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
   </world>
 </sdf>
