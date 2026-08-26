@@ -30,11 +30,9 @@ def generate_launch_description():
         output='screen'
     )
 
-    joint_state_publisher = Node(
-        package='joint_state_publisher',
-        executable='joint_state_publisher',
-        output='screen'
-    )
+    # 没有 joint_state_publisher 节点:关节状态由 URDF 里的
+    # gz-sim-joint-state-publisher-system 插件从仿真直接发出,经桥接进 ROS。
+    # 两者同时存在会互相覆盖 /joint_states,而通用节点发的是静态 0 位。
 
     spawn_entity = Node(
         package='ros_gz_sim',
@@ -48,13 +46,18 @@ def generate_launch_description():
     bridge = Node(
         package='ros_gz_bridge',
         executable='parameter_bridge',
+        # 方向符号: '[' = Gazebo→ROS, ']' = ROS→Gazebo, '@' = 双向。
+        # 除 /cmd_vel 外全部是传感与状态数据,只应单向流出仿真;
+        # 尤其 /tf 若保持双向,会把 slam_toolbox 算出的 map→odom
+        # 反向推回 Gazebo,而仿真侧没有任何东西需要它。
         arguments=[
-            '/cmd_vel@geometry_msgs/msg/Twist@gz.msgs.Twist',
-            '/odom@nav_msgs/msg/Odometry@gz.msgs.Odometry',
-            '/scan@sensor_msgs/msg/LaserScan@gz.msgs.LaserScan',
+            '/cmd_vel@geometry_msgs/msg/Twist]gz.msgs.Twist',
+            '/odom@nav_msgs/msg/Odometry[gz.msgs.Odometry',
+            '/scan@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan',
             '/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock',
-            '/scan/points@sensor_msgs/msg/PointCloud2@gz.msgs.PointCloudPacked',
-            '/tf@tf2_msgs/msg/TFMessage@gz.msgs.Pose_V',
+            '/scan/points@sensor_msgs/msg/PointCloud2[gz.msgs.PointCloudPacked',
+            '/tf@tf2_msgs/msg/TFMessage[gz.msgs.Pose_V',
+            '/joint_states@sensor_msgs/msg/JointState[gz.msgs.Model',
         ],
         output='screen'
     )
@@ -62,7 +65,6 @@ def generate_launch_description():
     return LaunchDescription([
         gazebo,
         robot_state_publisher,
-        joint_state_publisher,
         spawn_entity,
         bridge,
     ])

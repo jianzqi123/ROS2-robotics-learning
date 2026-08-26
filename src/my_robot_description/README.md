@@ -65,7 +65,7 @@ RViz.
 
 ```
 my_robot_description/
-├── urdf/my_robot.urdf          # robot model + DiffDrive plugin + LiDAR sensor
+├── urdf/my_robot.urdf           # robot model + DiffDrive / JointState / LiDAR plugins
 ├── worlds/my_world.sdf          # 10×8 m indoor room with 3D structure
 ├── launch/
 │   ├── gazebo.launch.py         # Gazebo + robot spawn + ros_gz_bridge
@@ -75,7 +75,12 @@ my_robot_description/
 ├── maps/                        # saved occupancy grid
 │   ├── my_map.yaml
 │   └── my_map.pgm
-└── scripts/teleport_test.py     # automated physics-stability diagnostic
+├── scripts/teleport_test.py     # automated physics-stability diagnostic
+├── demo_map.gif                 # SLAM mapping run (Demo section above)
+├── demo_lidar.gif               # earlier build: raw 16-beam point cloud
+├── package.xml                  # dependencies — keep in sync with the launch files
+├── setup.py                     # installs urdf/worlds/config/rviz/launch/maps to share/
+└── README.md                    # this file
 ```
 
 ## Run it
@@ -225,6 +230,26 @@ before the 14.04° that would put a chassis corner on the floor.
 Caster friction is set to zero (`mu1 = mu2 = 0`) because they are attached with
 `fixed` joints and cannot roll; any friction there would fight every turn.
 
+The 1.91° figure is not just a bound — it is where the robot actually comes to
+rest. Spawning the model and reading Gazebo's ground-truth pose once it settles
+gives an orientation quaternion of `y = 0.0166592, w = 0.9998612`, i.e. a pitch
+of `2·atan2(y, w)`:
+
+| | value |
+|---|---|
+| Predicted caster contact angle | `atan(0.005 / 0.15)` = **1.9092°** |
+| Measured resting pitch | **1.9091°** (0.003 % off) |
+| Measured chassis height | 0.099972 m (wheel contact puts it at 0.100 m) |
+
+The robot settles nose-down until the front caster touches, and stops exactly
+there. It does this *every* time, not just under braking, and the reason is in
+the mass table: the 0.3 kg LiDAR sits at `x = +0.12`, which puts the centre of
+mass 5.6 mm ahead of the wheel axle (`0.3 × 0.12 / 6.4 kg`). Nothing balances
+it, so the chassis always tips forward onto the front caster.
+
+That resting pitch is not cosmetic — it feeds straight into the `/scan`
+geometry below.
+
 ### LiDAR vertical geometry
 
 The LiDAR sits at **z = 0.185 m** above the floor (base_link origin is 0.100 m
@@ -255,10 +280,15 @@ Consequences:
 - The 0.25 m platform is detected only within **3.72 m**
   (`(0.25 − 0.185) / tan(1°)`); past that the beam passes over it. This is the
   measured 11.8 % hollow outline in the Results table.
-- If the chassis pitches nose-down by the caster limit of 1.91°, the effective
-  elevation becomes −0.91° and the beam reaches the floor at ~11.7 m — within
-  the room's ~12.8 m diagonal. Braking hard at long range can inject spurious
-  floor returns.
+- **The chassis is already pitched nose-down 1.91° while sitting still**, for
+  the centre-of-mass reason given above — this is the resting state, not a
+  braking transient. The effective elevation of `/scan` is therefore
+  `1.00° − 1.91° = −0.91°`, i.e. angled slightly *down*, and the beam reaches
+  the floor at `0.185 / tan(0.91°)` = **11.66 m**. The room's diagonal is
+  12.81 m, so along the longest sight lines the beam can land on the floor
+  before it reaches a wall and inject spurious short returns. Every wall in
+  this world is closer than 11.66 m from almost every position, which is why
+  the finished map is clean — the geometry is marginal, not safe.
 
 Fixes, if an exactly horizontal `/scan` is wanted: use an odd beam count
 (15 beams → step 30°/14, middle index 7 lands on exactly 0°), shift the range
@@ -334,25 +364,52 @@ confirmed in the finished map.
 `package.xml` had declared only `rclpy` — everything else had happened to be
 installed already. See Known Issues.
 
+**A test that cannot fail is not a test.** Verifying the new `/joint_states`
+bridge produced three tempting "confirmations" in a row, and the first two were
+worthless:
+
+| Check | Result | Why it proves nothing |
+|---|---|---|
+| `parameter_bridge` starts without error | passes | Also passes with `gz.msgs.NotAThing` |
+| ROS-side topic appears with the right type | passes | Publisher is built from the *ROS* type alone |
+| Bridge logs `Creating GZ->ROS Bridge: [… (gz.msgs.Model) → …]` | passes | Log line echoes the string you typed |
+
+Each was only recognised as vacuous by running the same check against a
+deliberately invalid message type and watching it pass just as cleanly. The
+only real evidence was `ros2 topic echo /joint_states` against a running
+simulation, returning actual joint names and velocities. The habit worth
+keeping: before believing a green check, ask what a broken system would print —
+if the answer is "the same thing", the check is measuring nothing.
+
+**The physics confirmed a number nobody had measured yet.** Reading Gazebo's
+ground-truth pose during that verification showed the robot resting at a pitch
+of 1.9091°, against the 1.9092° derived from caster clearance months earlier —
+and revealed that this pitch is permanent rather than transient, which is a
+real correction to what this file used to claim about the `/scan` tilt.
+
 ## Known Issues / Next Steps
 
-- [ ] **`/joint_states` is not bridged from Gazebo.** The generic
-  `joint_state_publisher` node publishes static zeros, so the wheels never
-  rotate in RViz and the wheel TFs are decoupled from the simulation. Fix by
-  adding `gz-sim-joint-state-publisher-system` to the URDF, bridging the
-  resulting topic, and removing the `joint_state_publisher` node so the two
-  don't compete. Does not affect SLAM — scan matching depends on
-  `lidar_link` (fixed joint), `odom`, and `/scan`, none of which involve wheel
-  joint state.
-- [ ] **Bridge directions are all bidirectional (`@`).** `/odom`, `/scan`,
-  `/scan/points` and `/tf` should be Gazebo→ROS (`[`) and `/cmd_vel` should be
-  ROS→Gazebo (`]`). Bridging `/tf` both ways pushes `slam_toolbox`'s
-  `map → odom` transform back into Gazebo, which nothing there needs.
-- [ ] **`package.xml` declares only `rclpy`** — `rosdep install` will not
-  reproduce the environment. Needs `robot_state_publisher`, `ros_gz_sim`,
-  `ros_gz_bridge`, `slam_toolbox`, `nav2_lifecycle_manager`, `nav2_map_server`,
-  `rviz2`, `teleop_twist_keyboard`.
-- [ ] **Decide how to handle the 1° `/scan` tilt** (options above).
+- [x] ~~**`/joint_states` is not bridged from Gazebo.**~~ Fixed:
+  `gz-sim-joint-state-publisher-system` added to the URDF with an explicit
+  `<topic>joint_states</topic>`, bridged as
+  `sensor_msgs/msg/JointState[gz.msgs.Model`, and the competing
+  `joint_state_publisher` node removed from `gazebo.launch.py`. Verified end to
+  end against a running sim — `/joint_states` now carries live
+  `left_wheel_joint` / `right_wheel_joint` position, velocity and effort.
+- [x] ~~**Bridge directions are all bidirectional (`@`).**~~ Fixed: `/cmd_vel`
+  is now ROS→Gazebo (`]`), and `/odom`, `/scan`, `/scan/points`, `/tf` and
+  `/joint_states` are Gazebo→ROS (`[`).
+- [x] ~~**`package.xml` declares only `rclpy`.**~~ Fixed: all eleven runtime
+  packages declared, plus the message packages `teleport_test.py` imports.
+  Description and license filled in.
+- [ ] **Decide how to handle the 1° `/scan` tilt** (options above). Now more
+  pressing than it first looked: combined with the 1.91° resting pitch, the
+  net elevation is −0.91°, which puts the floor inside sensor range along the
+  room's longer diagonals.
+- [ ] **Rebalance the chassis, or accept the pitch.** The 5.6 mm forward
+  centre-of-mass offset is entirely the LiDAR's 0.3 kg at `x = +0.12`. Moving
+  the LiDAR onto the wheel axle, or adding counterweight aft, would let the
+  robot rest level and remove the −0.91° scan tilt at its source.
 - [ ] `map_saver_cli` logs a default `free_thresh` of 0.25 but writes 0.196 to
   the YAML. The YAML value is what AMCL will read — worth knowing before
   tuning localization.

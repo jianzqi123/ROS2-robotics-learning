@@ -3,11 +3,31 @@
 <package format="3">
   <name>my_robot_description</name>
   <version>0.0.0</version>
-  <description>TODO: Package description</description>
+  <description>
+    Differential-drive mobile robot with a 16-beam 3D LiDAR: URDF model,
+    Gazebo Harmonic simulation in a purpose-built indoor world, and 2D SLAM
+    with slam_toolbox producing an occupancy grid ready for Nav2.
+  </description>
   <maintainer email="jianzqi123@gmail.com">qiking</maintainer>
-  <license>TODO: License declaration</license>
+  <license>Apache-2.0</license>
 
+  <!-- teleport_test.py 直接 import 的库 -->
   <depend>rclpy</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+
+  <!-- 仅在 launch 时被拉起的节点,不参与编译,故为 exec_depend -->
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>ros_gz_sim</exec_depend>
+  <exec_depend>ros_gz_bridge</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>tf2_msgs</exec_depend>
+  <exec_depend>rosgraph_msgs</exec_depend>
+  <exec_depend>slam_toolbox</exec_depend>
+  <exec_depend>nav2_lifecycle_manager</exec_depend>
+  <exec_depend>nav2_map_server</exec_depend>
+  <exec_depend>rviz2</exec_depend>
+  <exec_depend>teleop_twist_keyboard</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
