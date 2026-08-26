@@ -41,6 +41,25 @@ hand-checking numbers that looked plausible but weren't.
 ROS 2 Jazzy · Gazebo Harmonic (gz-sim) · URDF/SDF · `ros_gz_bridge` ·
 `slam_toolbox` · `nav2_map_server` · `nav2_lifecycle_manager` · RViz2
 
+## Demo
+
+![SLAM mapping run](demo_map.gif)
+
+A teleoperated mapping run, seen top-down in RViz: 5 min 20 s of simulated time
+from an empty grid to the finished occupancy map, with the live `/scan` points
+spraying out ahead of the robot as it goes.
+
+The final frame is worth pausing on, because it shows the sensor's limits as
+plainly as its coverage. The two 1 m boxes and the shelf fill in solid. The
+0.25 m `platform` resolves as a **hollow outline**. `table1` leaves only a
+scatter of **leg dots** where its top should be. `overhead_beam` never appears
+**at all**. Each of those is a prediction made from the LiDAR's vertical
+geometry before the map existed — see [Results](#the-2d-map-is-a-slice-and-it-shows)
+for the numbers behind them.
+
+An [earlier build](demo.gif) — before the room world and SLAM — shows the same
+robot in the original obstacle world with the raw 16-beam point cloud in RViz.
+
 ## Repository Layout
 
 ```
@@ -336,6 +355,7 @@ installed already. See Known Issues.
 - [ ] `map_saver_cli` logs a default `free_thresh` of 0.25 but writes 0.196 to
   the YAML. The YAML value is what AMCL will read — worth knowing before
   tuning localization.
-- [ ] Record a new demo GIF (the existing one predates the SLAM work).
+- [x] ~~Record a new demo GIF (the existing one predates the SLAM work).~~
+  Done — `demo_map.gif`, see [Demo](#demo).
 - [ ] Nav2 integration: AMCL localization against the saved map, then
   autonomous navigation.
