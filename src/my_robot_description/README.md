@@ -57,8 +57,9 @@ scatter of **leg dots** where its top should be. `overhead_beam` never appears
 geometry before the map existed — see [Results](#the-2d-map-is-a-slice-and-it-shows)
 for the numbers behind them.
 
-An [earlier build](demo.gif) — before the room world and SLAM — shows the same
-robot in the original obstacle world with the raw 16-beam point cloud in RViz.
+An [earlier build](demo_lidar.gif) — before the room world and SLAM — shows the
+same robot in the original obstacle world with the raw 16-beam point cloud in
+RViz.
 
 ## Repository Layout
 
