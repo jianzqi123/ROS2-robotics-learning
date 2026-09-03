@@ -50,12 +50,19 @@ from an empty grid to the finished occupancy map, with the live `/scan` points
 spraying out ahead of the robot as it goes.
 
 The final frame is worth pausing on, because it shows the sensor's limits as
-plainly as its coverage. The two 1 m boxes and the shelf fill in solid. The
-0.25 m `platform` resolves as a **hollow outline**. `table1` leaves only a
-scatter of **leg dots** where its top should be. `overhead_beam` never appears
-**at all**. Each of those is a prediction made from the LiDAR's vertical
-geometry before the map existed — see [Results](#the-2d-map-is-a-slice-and-it-shows)
-for the numbers behind them.
+plainly as its coverage. The two 1 m boxes and the shelf fill in solid.
+`table1` leaves only a scatter of **leg dots** where its top should be.
+`overhead_beam` never appears **at all**. Both of those follow directly from
+the LiDAR's vertical geometry — see
+[Results](#the-2d-map-is-a-slice-and-it-shows) for the numbers. The 0.25 m
+`platform` resolves as a **hollow outline**, which was predicted too, but for a
+reason that later turned out to be wrong; the caveats in that section explain
+why.
+
+Recorded with the original 5 mm caster clearance, before the `/scan` elevation
+was corrected from −0.909° to −0.337° — so this is a record of the geometry
+described in [Design Notes](#a-mechanical-clearance-silently-aims-the-sensor),
+not of the current one.
 
 An [earlier build](demo_lidar.gif) — before the room world and SLAM — shows the
 same robot in the original obstacle world with the raw 16-beam point cloud in
@@ -178,11 +185,28 @@ Measured occupancy in each object's footprint:
 | `table1` | top at 0.73 m | **legs only** | **4.1 %** |
 | `platform` | 0.25 m | **outline only** | **11.8 %** |
 
-The beam passes under the overhead beam, under the tabletop but through the
-legs, and — because of the 1° tilt described below — over the top of the low
-platform beyond 3.72 m, leaving a hollow outline rather than a filled box.
-These are not gaps in coverage; they are the predicted consequences of sampling
-the world at one height.
+The beam passes under the overhead beam, and under the tabletop but through the
+legs. Those two rows are solidly explained by beam height alone, and they are
+the point of the section: these are not gaps in coverage, they are the
+consequences of sampling the world at one height.
+
+> **Two caveats, both discovered after these numbers were taken.**
+>
+> **1. The `platform` row's explanation was wrong.** Earlier versions of this
+> file said the beam passed *over* the 0.25 m platform beyond 3.72 m, computed
+> from an assumed `+1°` upward tilt. But the net elevation was `−0.909°` —
+> pointing *down* — so a beam leaving the LiDAR at 0.181 m only ever gets
+> lower and cannot clear a 0.25 m obstacle at any range. The 11.8 % is real;
+> the reason given for it was not. A 2D scan marks only the outer perimeter of
+> a solid box (≈16 % of a 1.2 m × 1.2 m footprint at 0.05 m/cell), which is the
+> right order of magnitude, but it does not explain why `box1` reads 50.6 %
+> under the same logic. **Unresolved — needs the measurement script re-run and
+> the metric's definition pinned down.**
+>
+> **2. These were measured with the original 5 mm caster clearance**, i.e. at a
+> net `/scan` elevation of `−0.909°`. The current geometry is `−0.337°`, so the
+> map should be regenerated before these figures are quoted again. The saved
+> `maps/my_map.pgm` and the demo GIF are both from the earlier geometry.
 
 ## Design Notes
 
@@ -214,41 +238,40 @@ but their height matters:
 | | value |
 |---|---|
 | Wheel contact plane | `z = −0.100 m` |
-| Caster lowest point | `z = −0.095 m` |
-| Clearance | **5 mm** |
-| Pitch before a caster touches | `atan(0.005 / 0.15) = 1.91°` |
+| Caster lowest point | `z = −0.0965 m` |
+| Clearance | **3.5 mm** |
+| Pitch before a caster touches | `atan(0.0035 / 0.15) = 1.337°` |
 | Pitch before the chassis corner touches | `atan(0.05 / 0.20) = 14.04°` |
 
-The casters sit 5 mm **above** the wheel contact plane on purpose. If they were
-coplanar with the wheels, normal-load distribution across four contact points
-would be statically indeterminate; the casters (with friction zeroed) would
-absorb load that the driven wheels need for traction and lateral constraint,
-and the robot would understeer badly. Sitting 5 mm high, they contribute
-nothing in normal driving and only catch the chassis at 1.91° of pitch — well
-before the 14.04° that would put a chassis corner on the floor.
+The casters must not be coplanar with the wheels. Normal-load distribution
+across four contact points would be statically indeterminate; the casters (with
+friction zeroed) would absorb load the driven wheels need for traction and
+lateral constraint, and the robot would understeer badly.
 
 Caster friction is set to zero (`mu1 = mu2 = 0`) because they are attached with
 `fixed` joints and cannot roll; any friction there would fight every turn.
 
-The 1.91° figure is not just a bound — it is where the robot actually comes to
-rest. Spawning the model and reading Gazebo's ground-truth pose once it settles
-gives an orientation quaternion of `y = 0.0166592, w = 0.9998612`, i.e. a pitch
-of `2·atan2(y, w)`:
+### The front caster is load-bearing at rest — it is not a spare
+
+This file used to claim the casters "contribute nothing in normal driving".
+That is false, and measuring it is what exposed the `/scan` geometry problem
+below.
+
+The 0.3 kg LiDAR sits at `x = +0.12`, which puts the centre of mass 5.6 mm
+ahead of the wheel axle (`0.3 × 0.12 / 6.4 kg`). Nothing balances it, so the
+chassis always tips forward until the front caster touches, and stops exactly
+there — *every* time, not just under braking. Spawning the model and reading
+Gazebo's ground-truth pose once it settles gives an orientation quaternion of
+`y = 0.0116637, w = 0.9999320`, i.e. a pitch of `2·atan2(y, w)`:
 
 | | value |
 |---|---|
-| Predicted caster contact angle | `atan(0.005 / 0.15)` = **1.9092°** |
-| Measured resting pitch | **1.9091°** (0.003 % off) |
-| Measured chassis height | 0.099972 m (wheel contact puts it at 0.100 m) |
+| Predicted caster contact angle | `atan(0.0035 / 0.15)` = **1.33666°** |
+| Measured resting pitch | **1.33659°** (0.005 % off) |
+| Measured chassis height | 0.099986 m (wheel contact puts it at 0.100 m) |
 
-The robot settles nose-down until the front caster touches, and stops exactly
-there. It does this *every* time, not just under braking, and the reason is in
-the mass table: the 0.3 kg LiDAR sits at `x = +0.12`, which puts the centre of
-mass 5.6 mm ahead of the wheel axle (`0.3 × 0.12 / 6.4 kg`). Nothing balances
-it, so the chassis always tips forward onto the front caster.
-
-That resting pitch is not cosmetic — it feeds straight into the `/scan`
-geometry below.
+The clearance is 3.5 mm rather than the 5 mm it started at, and the reason is
+entirely about where this pitch aims the LiDAR — see below.
 
 ### LiDAR vertical geometry
 
@@ -273,28 +296,57 @@ vertical row — `start = (vertical_count / 2) * count`, i.e. integer index 8,
 which is the **+1.000°** beam. So `/scan`, the topic `slam_toolbox` actually
 consumes, is tilted 1° upward.
 
-Consequences:
+That +1° is measured in the LiDAR's own frame. **The chassis does not sit
+level**, so it is not what `/scan` does in the world:
 
-- Beam height above the floor is `0.185 + r·tan(1°)` — 0.22 m at 2 m, 0.36 m at
-  10 m. Against 1.5 m walls this is harmless.
-- The 0.25 m platform is detected only within **3.72 m**
-  (`(0.25 − 0.185) / tan(1°)`); past that the beam passes over it. This is the
-  measured 11.8 % hollow outline in the Results table.
-- **The chassis is already pitched nose-down 1.91° while sitting still**, for
-  the centre-of-mass reason given above — this is the resting state, not a
-  braking transient. The effective elevation of `/scan` is therefore
-  `1.00° − 1.91° = −0.91°`, i.e. angled slightly *down*, and the beam reaches
-  the floor at `0.185 / tan(0.91°)` = **11.66 m**. The room's diagonal is
-  12.81 m, so along the longest sight lines the beam can land on the floor
-  before it reaches a wall and inject spurious short returns. Every wall in
-  this world is closer than 11.66 m from almost every position, which is why
-  the finished map is clean — the geometry is marginal, not safe.
+```
+net elevation = +1.000° (beam)  −  1.337° (resting pitch)  =  −0.337°
+```
 
-Fixes, if an exactly horizontal `/scan` is wanted: use an odd beam count
-(15 beams → step 30°/14, middle index 7 lands on exactly 0°), shift the range
-asymmetrically (−16°/+14° keeps 16 beams at 2° spacing with index 8 on 0°), or
-add a separate dedicated 2D LiDAR link for SLAM and keep the 16-beam sensor for
-`/scan/points`. The last option is what real robots usually do.
+The scan points slightly *down*, not up.
+
+### A mechanical clearance silently aims the sensor
+
+The resting pitch and the beam elevation are the same magnitude in opposite
+directions, which means **the caster clearance — a number chosen for contact
+reasons — is what actually decides where `/scan` points.** Nothing in either
+subsystem's documentation mentions the other.
+
+Working the coupling through, with the LiDAR's height recomputed at each pitch
+(it sits at `x = +0.12`, so tipping forward lowers it):
+
+| Caster clearance | Resting pitch | Net `/scan` elevation | Beam reaches floor at |
+|---|---|---|---|
+| 5.0 mm (original) | 1.909° | −0.909° | **11.40 m** |
+| 4.741 mm (critical) | 1.809° | −0.809° | 12.81 m — the room diagonal |
+| **3.5 mm (current)** | **1.337°** | **−0.337°** | **31.0 m** |
+
+The room's diagonal is 12.806 m and the LiDAR's max range is 30 m.
+
+At the original 5 mm the beam met the floor at 11.40 m — *inside the room*. The
+longest sight lines could return floor points instead of walls. The finished
+map came out clean only because nearly every wall is nearer than 11.40 m from
+nearly every position: the design cleared its own requirement by **0.259 mm of
+caster clearance**, which is not a margin worth relying on.
+
+At 3.5 mm the intersection moves to 31.0 m — past the sensor's own 30 m range
+limit. The beam therefore *cannot* return a floor point, and that guarantee no
+longer depends on the room being small enough. Verified against a running sim:
+measured resting pitch **1.33659°** against **1.33666°** predicted, 0.005 % off.
+
+A slightly descending beam was chosen deliberately over a level or ascending
+one. An ascending beam passes over low obstacles beyond some range and stops
+reporting them, which for Nav2 is a collision. A descending beam never misses a
+low obstacle; its only failure mode is striking the floor, and that has now been
+pushed outside the sensor's range entirely.
+
+The +1° beam itself is left alone, because it is not a modelling error: a real
+VLP-16 also puts 16 beams at 2° spacing across ±15° and likewise has none on
+the horizon. Flattening it would mean an odd beam count (15 beams → step
+30°/14, middle index 7 on exactly 0°), an asymmetric range (−16°/+14°), or a
+dedicated 2D LiDAR link with the 16-beam sensor kept for `/scan/points`. The
+last is what real robots do and stays the right answer if `/scan` ever has to be
+exactly horizontal — but at −0.337° net it is no longer urgent.
 
 ### World layout
 
@@ -387,6 +439,25 @@ of 1.9091°, against the 1.9092° derived from caster clearance months earlier �
 and revealed that this pitch is permanent rather than transient, which is a
 real correction to what this file used to claim about the `/scan` tilt.
 
+**Two subsystems, each correct, coupled through a number neither documents.**
+The caster clearance was chosen for contact reasons: high enough not to steal
+normal load from the driven wheels, low enough to catch the chassis before a
+corner scrapes. The beam elevation was inherited from the VLP-16 spec. Neither
+decision is wrong, and neither file mentions the other — but their *sum* is
+where `/scan` actually points, and that sum put the floor 11.40 m away inside a
+room whose diagonal is 12.81 m. The design met its own requirement by 0.259 mm
+of caster clearance. Nothing in either subsystem would ever have flagged that;
+it only appears when you multiply one by the other.
+
+The fix that followed is worth recording because the obvious one was wrong.
+Moving the LiDAR onto the wheel axle would zero the 5.6 mm centre-of-mass
+offset and let the robot rest level — but a robot balanced *exactly* on its
+wheel line is in neutral equilibrium, and would tip onto whichever caster the
+landing noise favoured, replacing a deterministic 1.9° tilt with a
+nondeterministic ±1.3° one. Keeping the mass deliberately forward and shrinking
+the *travel* instead keeps the resting attitude repeatable. Balance was the
+intuitive fix; determinism was the useful one.
+
 ## Known Issues / Next Steps
 
 - [x] ~~**`/joint_states` is not bridged from Gazebo.**~~ Fixed:
@@ -402,14 +473,22 @@ real correction to what this file used to claim about the `/scan` tilt.
 - [x] ~~**`package.xml` declares only `rclpy`.**~~ Fixed: all eleven runtime
   packages declared, plus the message packages `teleport_test.py` imports.
   Description and license filled in.
-- [ ] **Decide how to handle the 1° `/scan` tilt** (options above). Now more
-  pressing than it first looked: combined with the 1.91° resting pitch, the
-  net elevation is −0.91°, which puts the floor inside sensor range along the
-  room's longer diagonals.
-- [ ] **Rebalance the chassis, or accept the pitch.** The 5.6 mm forward
-  centre-of-mass offset is entirely the LiDAR's 0.3 kg at `x = +0.12`. Moving
-  the LiDAR onto the wheel axle, or adding counterweight aft, would let the
-  robot rest level and remove the −0.91° scan tilt at its source.
+- [x] ~~**Decide how to handle the 1° `/scan` tilt.**~~ Resolved by shrinking
+  the caster clearance from 5.0 mm to 3.5 mm, which cuts the resting pitch from
+  1.909° to 1.337° and moves the net `/scan` elevation from −0.909° to −0.337°.
+  The beam now meets the floor at 31.0 m, past the sensor's own 30 m range
+  limit, so floor returns are impossible rather than merely unlikely. The +1°
+  beam is deliberately left alone — it matches a real VLP-16. Verified against
+  a running sim: 1.33659° measured against 1.33666° predicted.
+- [ ] **Regenerate the map and re-measure the slice table.** `maps/my_map.pgm`,
+  `demo_map.gif` and every figure in [Results](#results) were produced at the
+  old −0.909° elevation. Nav2 should localize against a map built with the
+  geometry it will actually run.
+- [ ] **Re-derive the `platform` occupancy figure.** The 11.8 % is measured and
+  real; the explanation this file gave for it was wrong (see the caveat in the
+  slice section), and the perimeter-only account that replaces it does not
+  explain `box1` at 50.6 %. Needs the measurement script re-run with the
+  metric's definition stated.
 - [ ] `map_saver_cli` logs a default `free_thresh` of 0.25 but writes 0.196 to
   the YAML. The YAML value is what AMCL will read — worth knowing before
   tuning localization.

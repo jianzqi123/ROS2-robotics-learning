@@ -44,14 +44,20 @@ Two results worth calling out, both documented in detail in the package README:
 
 **The 2D map is a slice, and it shows.** Objects were deliberately placed at
 heights that straddle the LiDAR's beam envelope. The overhead beam is absent
-from the map (0.0 % occupancy), the table appears as legs only (4.1 %), and the
-low platform resolves as a hollow outline (11.8 %) — each one a predicted
-consequence of sampling the world at a single height, not a coverage gap.
+from the map (0.0 % occupancy) and the table appears as legs only (4.1 %) —
+consequences of sampling the world at a single height, not coverage gaps.
 
-**`/scan` is tilted 1° upward, and can't not be.** With 16 beams over ±15°, no
-beam lands on the horizon; `ros_gz_bridge` flattens the 3D scan by taking the
-middle row, which is the +1° beam. This was found by reading the bridge's
-source, and it quantitatively predicts the hollow platform outline above.
+**A 0.26 mm mechanical tolerance was aiming the LiDAR.** Two subsystems, each
+defensible on its own: the caster clearance (5 mm, chosen so the casters don't
+steal traction from the driven wheels) and the beam elevation (+1°, inherited
+from the VLP-16 spec, since 16 beams over ±15° leave none on the horizon).
+Neither file mentions the other — but the robot rests nose-down on that
+clearance, so their *sum* is where `/scan` actually points. It came to −0.909°,
+putting the floor 11.40 m away inside a room whose diagonal is 12.81 m. The
+design cleared its own requirement by 0.259 mm of caster clearance. Shrinking
+the clearance to 3.5 mm moves the floor intersection to 31.0 m — beyond the
+sensor's own 30 m range limit, so floor returns became impossible rather than
+merely unlikely. Predicted 1.33666° resting pitch, measured 1.33659°.
 
 The earlier stage — the same robot in the original obstacle world, with the raw
 16-beam point cloud in RViz, before the room and SLAM existed:
