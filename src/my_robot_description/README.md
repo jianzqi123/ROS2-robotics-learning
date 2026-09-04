@@ -82,7 +82,9 @@ my_robot_description/
 ├── maps/                        # saved occupancy grid
 │   ├── my_map.yaml
 │   └── my_map.pgm
-├── scripts/teleport_test.py     # automated physics-stability diagnostic
+├── scripts/
+│   ├── teleport_test.py         # automated physics-stability diagnostic
+│   └── map_slice_check.py       # occupancy measurement for the slice table
 ├── demo_map.gif                 # SLAM mapping run (Demo section above)
 ├── demo_lidar.gif               # earlier build: raw 16-beam point cloud
 ├── package.xml                  # dependencies — keep in sync with the launch files
@@ -175,38 +177,53 @@ converged; a map with unclosed drift stretches along the travel direction.
 ### The 2D map is a slice, and it shows
 
 The objects in the world were placed at heights chosen to test exactly this.
-Measured occupancy in each object's footprint:
+`scripts/map_slice_check.py` measures the result, deriving every footprint from
+`my_world.sdf` and every beam angle from `my_robot.urdf` so the numbers cannot
+drift away from the model:
 
-| Object | Height | Predicted in 2D map | Measured |
-|---|---|---|---|
-| `box1` (control) | 1.0 m | full | 50.6 % |
-| `box2` (control) | 1.0 m | full | 71.1 % |
-| `overhead_beam` | 1.1–1.3 m | **absent** | **0.0 %** |
-| `table1` | top at 0.73 m | **legs only** | **4.1 %** |
-| `platform` | 0.25 m | **outline only** | **11.8 %** |
+```bash
+python3 src/my_robot_description/scripts/map_slice_check.py
+```
 
-The beam passes under the overhead beam, and under the tabletop but through the
-legs. Those two rows are solidly explained by beam height alone, and they are
-the point of the section: these are not gaps in coverage, they are the
-consequences of sampling the world at one height.
+| Object | Height | Footprint | Occupied | Thin-shell | Band | Sides seen |
+|---|---|---|---|---|---|---|
+| `box1` | 0.00–1.00 m | 21×21 | 22.7 % | 18.1 % | 1.25× | 4/4 |
+| `box2` | 0.00–1.00 m | 21×21 | 22.0 % | 18.1 % | 1.21× | 4/4 |
+| `cylinder1` | 0.00–1.00 m | 21×21 | 16.8 % | 18.1 % | 0.93× | 3/4 |
+| `shelf` | 0.00–2.00 m | 9×33 | 26.6 % | 26.9 % | 0.99× | 4/4 |
+| `crates` | 0.00–1.00 m | 13×13 | 27.8 % | 28.4 % | 0.98× | 4/4 |
+| `platform` | 0.00–0.25 m | 25×25 | 14.9 % | 15.4 % | 0.97× | 4/4 |
+| `table1` | 0.00–0.78 m | 25×17 | **5.2 %** | 18.8 % | **0.28×** | 2/4 |
+| `overhead_beam` | 1.10–1.30 m | 41×5 | **0.0 %** | 42.9 % | **0.00×** | 0/4 |
 
-> **Two caveats, both discovered after these numbers were taken.**
+**Thin-shell** is the fraction of the footprint that its boundary ring occupies
+— what a 2D scan *should* mark, since it only ever sees a solid object's outer
+surface. **Band** is occupied ÷ ring: 1.0 means exactly a one-cell shell.
+
+Every solid object lands between 0.93× and 1.25×. That single fact is the
+section's real result: the map is a one-cell outline of whatever the beam plane
+intersects, and the small excess on `box1` / `box2` is pose uncertainty
+smearing the shell to slightly over one cell. Against that baseline the two
+deliberate cases stand out unambiguously — `table1` at 0.28× is four leg posts
+and no tabletop, and `overhead_beam` at 0.00× is simply not there. These are
+not gaps in coverage; they are the consequence of sampling the world at one
+height.
+
+> **The earlier version of this table was wrong, and the script is why it is
+> not wrong now.** It reported `box1` at 50.6 % and `box2` at 71.1 % against a
+> thin-shell prediction of ~18 %, an excess this file could not explain and
+> flagged as unresolved. Re-measuring the *same* map with a stated metric gives
+> 22.7 % and 22.0 %. The contradiction was never in the physics — the original
+> figures came from a one-off measurement whose footprint definition was never
+> written down, so it could not be checked. Nothing about the sensor needed
+> explaining; the measurement did.
 >
-> **1. The `platform` row's explanation was wrong.** Earlier versions of this
-> file said the beam passed *over* the 0.25 m platform beyond 3.72 m, computed
-> from an assumed `+1°` upward tilt. But the net elevation was `−0.909°` —
-> pointing *down* — so a beam leaving the LiDAR at 0.181 m only ever gets
-> lower and cannot clear a 0.25 m obstacle at any range. The 11.8 % is real;
-> the reason given for it was not. A 2D scan marks only the outer perimeter of
-> a solid box (≈16 % of a 1.2 m × 1.2 m footprint at 0.05 m/cell), which is the
-> right order of magnitude, but it does not explain why `box1` reads 50.6 %
-> under the same logic. **Unresolved — needs the measurement script re-run and
-> the metric's definition pinned down.**
->
-> **2. These were measured with the original 5 mm caster clearance**, i.e. at a
-> net `/scan` elevation of `−0.909°`. The current geometry is `−0.337°`, so the
-> map should be regenerated before these figures are quoted again. The saved
-> `maps/my_map.pgm` and the demo GIF are both from the earlier geometry.
+> **These figures are from the pre-`6262d5d` map.** `maps/my_map.pgm` and
+> `demo_map.gif` were both recorded at the old 5 mm caster clearance, i.e. a
+> net `/scan` elevation of `−0.909°`; the current geometry is `−0.337°`. The
+> script reads beam geometry from the *current* URDF and cannot tell what a
+> saved `.pgm` was built with, so it prints both and leaves the comparison to
+> you. Re-run it after regenerating the map.
 
 ## Design Notes
 
@@ -484,11 +501,11 @@ intuitive fix; determinism was the useful one.
   `demo_map.gif` and every figure in [Results](#results) were produced at the
   old −0.909° elevation. Nav2 should localize against a map built with the
   geometry it will actually run.
-- [ ] **Re-derive the `platform` occupancy figure.** The 11.8 % is measured and
-  real; the explanation this file gave for it was wrong (see the caveat in the
-  slice section), and the perimeter-only account that replaces it does not
-  explain `box1` at 50.6 %. Needs the measurement script re-run with the
-  metric's definition stated.
+- [x] ~~**Re-derive the `platform` occupancy figure.**~~ Resolved by
+  `scripts/map_slice_check.py`, which derives footprints from the world file and
+  beam geometry from the URDF, and states its metric. Re-measuring the same map
+  showed the old `box1` 50.6 % / `box2` 71.1 % figures were measurement error,
+  not physics: every solid object sits at 0.93–1.25× a one-cell shell.
 - [ ] `map_saver_cli` logs a default `free_thresh` of 0.25 but writes 0.196 to
   the YAML. The YAML value is what AMCL will read — worth knowing before
   tuning localization.
