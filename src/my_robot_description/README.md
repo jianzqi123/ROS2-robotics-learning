@@ -42,6 +42,9 @@ hand-checking numbers that looked plausible but weren't.
   fixed motion sequence and compares wheel odometry against Gazebo ground truth
 - **Map measurement** (`scripts/map_slice_check.py`) that recomputes every
   occupancy figure in this file from the world file and the URDF
+- **Unattended navigation test** (`scripts/nav2_test.py`) that drives a goal
+  sequence through the map's tightest passage and measures AMCL's recovery
+  from a deliberately wrong initial pose
 
 ## Tech Stack
 
@@ -95,7 +98,8 @@ my_robot_description/
 │   └── my_map.pgm
 ├── scripts/
 │   ├── teleport_test.py         # automated physics-stability diagnostic
-│   └── map_slice_check.py       # occupancy measurement for the slice table
+│   ├── map_slice_check.py       # occupancy measurement for the slice table
+│   └── nav2_test.py             # unattended navigation + AMCL convergence test
 ├── demo_map.gif                 # SLAM mapping run (Demo section above)
 ├── demo_lidar.gif               # earlier build: raw 16-beam point cloud
 ├── package.xml                  # dependencies — keep in sync with the launch files
@@ -302,30 +306,66 @@ caster clearance was supposed to buy.
 
 ### Navigation
 
-Verified end to end against a headless simulation — Gazebo with `-s`, Nav2 with
-`rviz:=false`, goal sent over the action interface, nothing clicked by hand:
+`scripts/nav2_test.py` runs the whole thing unattended — headless Gazebo,
+`rviz:=false`, goals sent over the action interface, every pose checked against
+Gazebo ground truth rather than against `/odom`:
 
-| Check | Result |
-|---|---|
-| Lifecycle nodes reaching `active` | 6 / 6 |
-| Goal | `(2.000, 1.000)` in `map` |
-| Final pose (Gazebo ground truth) | `(1.886, 0.888)` |
-| Distance from goal | 0.160 m (`xy_goal_tolerance` 0.15) |
-| `/odom` vs ground truth at the goal | **8.6 mm** over a ~2.2 m drive (**0.39 %**) |
-| Resting pitch after the drive | **1.3367°** vs 1.3367° predicted |
+```bash
+python3 src/my_robot_description/scripts/nav2_test.py
+```
 
-The goal checker is `stateful`, so it latches the moment the robot first falls
-inside 0.15 m and the robot coasts a few centimetres past — hence a final
-distance slightly outside the tolerance it reported success on.
+**Goal sequence.** Four goals, chosen so the second leg has no reasonable route
+except the 1.0 m gap between `wall_inner_a`'s west end and the west wall:
 
-Two of these rows are independent confirmations of earlier work rather than new
-results. The 0.39 % odometry error is the same wheel-odometry chain the
-[odometry accuracy](#odometry-accuracy) section measured at 1.08 % over a harder
-sequence. The 1.3367° resting pitch is the number
-[the caster clearance was chosen to produce](#a-mechanical-clearance-silently-aims-the-sensor),
-and it was read here *after* the robot had driven and stopped at a yaw of about
-10.5° — so it is a fresh measurement of a prediction made before Nav2 existed,
-not a re-reading of the same one.
+| Goal | Ground truth reached | Error |
+|---|---|---|
+| `(-4.5, 0.0)` north of the passage | `(-4.412, +0.050)` | 0.101 m |
+| `(-4.5, −3.0)` **through the passage** | `(-4.522, −2.925)` | **0.079 m** |
+| `(2.0, −3.0)` across the south | `(+1.910, −2.950)` | 0.103 m |
+| `(0.0, 0.0)` back to origin | `(+0.057, −0.078)` | 0.097 m |
+
+All four succeeded, every error inside the 0.15 m `xy_goal_tolerance`. The
+script does not take the planner's word for the route: it samples ground truth
+throughout each leg and checks whether any sample actually fell inside
+`x ∈ [−5.0, −4.0], y ∈ [−1.9, −1.1]`. It did — the robot went *through* the
+gap rather than detouring around the east end of the wall, which is the case
+`inflation_radius = 0.40` was chosen to keep open.
+
+**AMCL, deliberately misled.** Until this test the particle filter had never
+been asked to do anything: the robot spawns at the origin, `set_initial_pose`
+hands it the right answer, and odometry is accurate to 0.39 %. So the test
+injects a wrong pose and then rotates in place — no translation, so no odometry
+error is introduced and convergence depends on scan matching alone:
+
+| | position | heading |
+|---|---|---|
+| Ground truth | `(+0.057, −0.078)` | +10.2° |
+| Injected initial pose | `(+0.857, −0.678)` | +35.2° |
+| Error after injection | 0.958 m | 25.4° |
+| **After 16 s rotating in place** | **0.029 m** | **0.3°** |
+
+A 33× reduction in position error and 85× in heading. The pass criterion is
+deliberately not "the error got smaller" — a particle filter jitters, and
+jittering downward proves nothing. It has to land under 0.15 m *and* shed more
+than half the injected error.
+
+The 0.8 m / 25° offset is also chosen rather than picked: comfortably larger
+than AMCL's `update_min_d` of 0.25 m, so the filter cannot ignore it, but
+smaller than `laser_likelihood_max_dist` of 2.0 m, so the likelihood field
+still slopes toward the right answer. Beyond that it stops being a convergence
+test and becomes a global-relocalization test, which needs the
+`global_localization` service instead of an initial pose.
+
+**An earlier single-goal run** to `(2.0, 1.0)` also produced two incidental
+confirmations: `/odom` tracked ground truth to **8.6 mm over 2.2 m (0.39 %)**,
+and resting pitch measured **1.3367°** against 1.3367° predicted — read after
+the robot had driven and stopped at ~10.5° of yaw, so it is a fresh test of a
+prediction made before Nav2 existed, not a re-reading of the same measurement.
+
+That 0.39 % is the same wheel-odometry chain the
+[odometry accuracy](#odometry-accuracy) section measured at 1.08 % over a
+harder sequence, and the 1.3367° is the number
+[the caster clearance was chosen to produce](#a-mechanical-clearance-silently-aims-the-sensor).
 
 ## Design Notes
 
@@ -676,13 +716,16 @@ intuitive fix; determinism was the useful one.
   autonomous navigation.~~ Done — `nav2.launch.py` + `config/nav2_params.yaml`,
   verified headless: 6/6 lifecycle nodes active, goal reached to 0.16 m. See
   [Navigation](#navigation).
-- [ ] **Nav2 has only been driven to one goal.** Reaching `(2.0, 1.0)` across
-  open floor exercises the planner and the controller, but not recovery
-  behaviours, not the 1.0 m passage west of `wall_inner_a`, and not the west
-  wall's occlusion gap. A sequence of goals through the tight passage is the
-  next real test.
-- [ ] **AMCL is never actually challenged.** The robot spawns at the origin,
-  `set_initial_pose` hands it the right answer, and wheel odometry is accurate
-  to 0.39 %, so the particle filter has nothing to correct. Localization is
-  untested until the initial pose is deliberately wrong or the odometry is
-  deliberately degraded.
+- [x] ~~**Nav2 has only been driven to one goal.**~~ Fixed by
+  `scripts/nav2_test.py`: four goals, all reached inside 0.11 m, with the
+  trajectory verified to pass *through* the 1.0 m gap rather than around it.
+- [x] ~~**AMCL is never actually challenged.**~~ Fixed by the same script:
+  injecting a 0.958 m / 25.4° pose error and rotating in place recovers to
+  0.029 m / 0.3°. See [Navigation](#navigation).
+- [ ] **Recovery behaviours are still untested.** All four goals succeeded on
+  the first attempt, so `spin`, `backup` and `wait` never fired. Testing them
+  needs a deliberately blocked path — an obstacle dropped into the costmap
+  after planning, or a goal inside the west wall's occlusion gap.
+- [ ] **The tight passage was traversed, not stressed.** One pass at
+  0.22 m/s succeeded. Whether it survives repeated passes, or passes taken at
+  an angle rather than head-on, is not known.
