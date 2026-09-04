@@ -45,24 +45,25 @@ ROS 2 Jazzy · Gazebo Harmonic (gz-sim) · URDF/SDF · `ros_gz_bridge` ·
 
 ![SLAM mapping run](demo_map.gif)
 
-A teleoperated mapping run, seen top-down in RViz: 5 min 20 s of simulated time
+A teleoperated mapping run, seen top-down in RViz: 4 min 5 s of simulated time
 from an empty grid to the finished occupancy map, with the live `/scan` points
-spraying out ahead of the robot as it goes.
+spraying out ahead of the robot as it goes. This is the current geometry — the
+3.5 mm caster clearance, `/scan` at −0.337° — and it is the run that produced
+the committed `maps/my_map.pgm` and every figure in [Results](#results).
 
 The final frame is worth pausing on, because it shows the sensor's limits as
-plainly as its coverage. The two 1 m boxes and the shelf fill in solid.
-`table1` leaves only a scatter of **leg dots** where its top should be.
-`overhead_beam` never appears **at all**. Both of those follow directly from
-the LiDAR's vertical geometry — see
-[Results](#the-2d-map-is-a-slice-and-it-shows) for the numbers. The 0.25 m
-`platform` resolves as a **hollow outline**, which was predicted too, but for a
-reason that later turned out to be wrong; the caveats in that section explain
-why.
+plainly as its coverage. `table1` leaves only a scatter of **leg dots** where
+its top should be, and `overhead_beam` never appears **at all**; both follow
+directly from the LiDAR's vertical geometry.
 
-Recorded with the original 5 mm caster clearance, before the `/scan` elevation
-was corrected from −0.909° to −0.337° — so this is a record of the geometry
-described in [Design Notes](#a-mechanical-clearance-silently-aims-the-sensor),
-not of the current one.
+Everything else — both boxes, the shelf, the crates, the cylinder, the
+platform — is drawn as a **one-cell outline**, because that is all a single
+scan plane can ever see of a solid object. What separates them visually is not
+the outline but the *fill*: the boxes read as hollow because their interiors
+are **unknown**, never observed behind the near face, while `platform`'s
+interior is marked **free**. Something drove rays across the top of a 0.25 m
+obstacle that a −0.337° beam leaving the LiDAR at 0.182 m should never clear.
+See [Known Issues](#known-issues--next-steps).
 
 An [earlier build](demo_lidar.gif) — before the room world and SLAM — shows the
 same robot in the original obstacle world with the raw 16-beam point cloud in
@@ -533,8 +534,19 @@ intuitive fix; determinism was the useful one.
   `maps/my_map.pgm` is now a fresh run at the current −0.337° elevation, and
   every figure in [Results](#results) was re-measured from it with
   `map_slice_check.py`. Scale anisotropy 0.00 %, both inner spans exact.
-- [ ] **Re-record `demo_map.gif`.** It is still the −0.909° run. Everything
-  else in this file has moved to the current geometry.
+- [x] ~~**Re-record `demo_map.gif`.**~~ Done — the GIF is now the −0.337° run
+  that produced the committed map.
+- [ ] **`platform`'s interior is marked free, not unknown.** Every other solid
+  object shows an unknown interior (`box1` 74.8 %, `crates` 59.2 %) because
+  nothing ever sees behind the near face. `platform` reads 0.0 % unknown, so
+  rays crossed it. A −0.337° beam leaving the LiDAR at 0.182 m cannot clear a
+  0.25 m obstacle at any range, so the resting geometry does not explain it.
+  The likely mechanism is the pitch envelope working in the other direction:
+  under acceleration the chassis rotates nose-**up** onto the rear caster, up
+  to 1.337°, which puts the beam at `+1.000° + 1.337° = +2.337°` from a LiDAR
+  lifted to 0.1878 m — clearing 0.25 m beyond `(0.25 − 0.1878) / tan(2.337°)`
+  = **1.52 m**. Testable by logging `/odom` pitch against `/scan` returns in
+  the platform's bearing; until then it is a hypothesis, not a finding.
 - [ ] **`wall_completeness` is 87–99 %, not 100 %.** The gaps are occlusion by
   `shelf` and `cylinder1` (see [Map quality](#map-quality)), so nothing is
   broken — but Nav2 will plan against those gaps, and a costmap that thinks
