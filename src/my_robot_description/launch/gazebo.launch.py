@@ -1,9 +1,11 @@
 import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
+
 
 def generate_launch_description():
     pkg_share = get_package_share_directory('my_robot_description')
@@ -16,11 +18,19 @@ def generate_launch_description():
 
     world_file = os.path.join(pkg_share, 'worlds', 'my_world.sdf')
 
+    # headless:=true 时只起 gz 服务端(-s), 不开渲染窗口。
+    # 用于无人值守的验证 —— 传感器、物理、桥接全都照常工作,
+    # 少掉的只有 GUI。要在没有 DISPLAY 的地方跑测试, 这是唯一的办法。
+    headless = LaunchConfiguration('headless')
+    gz_args = PythonExpression([
+        "'-s -r ' if '", headless, "' == 'true' else '-r '"
+    ])
+
     gazebo = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(pkg_ros_gz_sim, 'launch', 'gz_sim.launch.py')
         ),
-        launch_arguments={'gz_args': ['-r ', world_file]}.items()
+        launch_arguments={'gz_args': [gz_args, world_file]}.items()
     )
 
     robot_state_publisher = Node(
@@ -63,6 +73,9 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
+        DeclareLaunchArgument(
+            'headless', default_value='false',
+            description='true 则只起 gz 服务端, 不开 GUI 窗口'),
         gazebo,
         robot_state_publisher,
         spawn_entity,

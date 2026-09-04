@@ -29,6 +29,20 @@
   <exec_depend>rviz2</exec_depend>
   <exec_depend>teleop_twist_keyboard</exec_depend>
 
+  <!-- nav2.launch.py 起的节点。只声明真正用到的这几个,
+       不声明 navigation2 元包 —— 那会连 route_server / docking_server
+       一起拖进来,而本项目的 launch 刻意没有启动它们。
+       nav2_bringup 只用来取 rviz/nav2_default_view.rviz。 -->
+  <exec_depend>nav2_amcl</exec_depend>
+  <exec_depend>nav2_controller</exec_depend>
+  <exec_depend>nav2_planner</exec_depend>
+  <exec_depend>nav2_behaviors</exec_depend>
+  <exec_depend>nav2_bt_navigator</exec_depend>
+  <exec_depend>nav2_costmap_2d</exec_depend>
+  <exec_depend>nav2_navfn_planner</exec_depend>
+  <exec_depend>dwb_core</exec_depend>
+  <exec_depend>nav2_bringup</exec_depend>
+
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
   <test_depend>ament_pep257</test_depend>

@@ -1,0 +1,290 @@
+# Nav2 参数 —— 针对本机器人和本房间推出来的, 不是抄的默认值。
+#
+# 三个贯穿全文的常数, 都有出处:
+#
+#   robot_radius = 0.25 m
+#       底盘 0.4 x 0.3 的角点: sqrt(0.20^2 + 0.15^2) = 0.250。
+#       轮子外缘 sqrt(0.05^2+0.20^2)=0.206, 万向轮尖端 0.20, 都更小,
+#       所以角点就是外接圆半径。用圆形近似而不是多边形足迹:
+#       差速车原地转弯时多边形足迹会扫过一片区域, 圆形近似天然覆盖这一点。
+#
+#   inflation_radius = 0.40 m  (硬上限 0.50)
+#       场地最窄通道是 wall_inner_a 西端(x=-4.0)到西墙内表面(x=-5.0)的 1.0 m。
+#       通道中线离两侧各 0.50 m。膨胀半径若 >= 0.50, 整条通道都会被抬成高代价,
+#       规划器会绕路甚至判定不可通行。取 0.40 留出一条真正零代价的中线。
+#
+#   laser 有效距离 0.3 ~ 12.0 m
+#       0.3 是传感器 <range><min>; 12.0 略小于房间对角线 12.81 m ——
+#       再远没有任何东西, 只会浪费 AMCL 的射线预算。
+#       注意传感器标称量程是 30 m, 那个数在这个房间里没有意义。
+
+amcl:
+  ros__parameters:
+    use_sim_time: true
+    base_frame_id: base_link
+    odom_frame_id: odom
+    global_frame_id: map
+    scan_topic: scan
+
+    robot_model_type: "nav2_amcl::DifferentialMotionModel"
+
+    # 里程计噪声。teleport_test.py 实测净位移误差 1.08%、航向误差 0.15%,
+    # 比 0.2 的默认值干净得多, 收紧到 0.1 可以让滤波器更信任 odom。
+    # 但 README 记录过撞墙时轮子空转 —— 那种时刻 odom 会瞬间失真,
+    # 太紧的 alpha 会让滤波器拒绝修正。0.1 是两者之间的折中。
+    alpha1: 0.1     # 旋转带来的旋转噪声
+    alpha2: 0.1     # 平移带来的旋转噪声
+    alpha3: 0.1     # 平移带来的平移噪声
+    alpha4: 0.1     # 旋转带来的平移噪声
+    alpha5: 0.1
+
+    laser_min_range: 0.3
+    laser_max_range: 12.0
+    max_beams: 60          # 360 线里取 60, 够用且省 CPU
+    laser_model_type: "likelihood_field"
+    sigma_hit: 0.2
+    z_hit: 0.5
+    z_rand: 0.5
+    z_max: 0.05
+    z_short: 0.05
+    lambda_short: 0.1
+    laser_likelihood_max_dist: 2.0
+
+    max_particles: 2000
+    min_particles: 500
+    pf_err: 0.05
+    pf_z: 0.99
+    recovery_alpha_fast: 0.0
+    recovery_alpha_slow: 0.0
+    resample_interval: 1
+    transform_tolerance: 1.0
+    update_min_a: 0.2      # 转 0.2 rad 更新一次
+    update_min_d: 0.25     # 走 0.25 m 更新一次
+    save_pose_rate: 0.5
+    tf_broadcast: true
+    set_initial_pose: true
+    # 机器人在 gazebo.launch.py 里就是从原点出生的, 直接给初值,
+    # 省掉每次都要在 RViz 里点 2D Pose Estimate。
+    initial_pose:
+      x: 0.0
+      y: 0.0
+      z: 0.0
+      yaw: 0.0
+
+map_server:
+  ros__parameters:
+    use_sim_time: true
+    yaml_filename: "my_map.yaml"
+
+map_saver:
+  ros__parameters:
+    use_sim_time: true
+    save_map_timeout: 5.0
+    free_thresh_default: 0.196
+    occupied_thresh_default: 0.65
+    map_subscribe_transient_local: true
+
+planner_server:
+  ros__parameters:
+    use_sim_time: true
+    expected_planner_frequency: 20.0
+    planner_plugins: ["GridBased"]
+    GridBased:
+      plugin: "nav2_navfn_planner::NavfnPlanner"
+      tolerance: 0.25          # = robot_radius, 目标点差一个身位就算到
+      use_astar: false
+      allow_unknown: false     # 地图里的未知区域(物体内部)不许穿
+
+controller_server:
+  ros__parameters:
+    use_sim_time: true
+    controller_frequency: 20.0
+    min_x_velocity_threshold: 0.001
+    min_theta_velocity_threshold: 0.001
+    failure_tolerance: 0.3
+    progress_checker_plugin: "progress_checker"
+    goal_checker_plugins: ["general_goal_checker"]
+    controller_plugins: ["FollowPath"]
+
+    progress_checker:
+      plugin: "nav2_controller::SimpleProgressChecker"
+      required_movement_radius: 0.5
+      movement_time_allowance: 10.0
+
+    general_goal_checker:
+      plugin: "nav2_controller::SimpleGoalChecker"
+      xy_goal_tolerance: 0.15
+      yaw_goal_tolerance: 0.20
+      stateful: true
+
+    FollowPath:
+      plugin: "dwb_core::DWBLocalPlanner"
+
+      # 速度上限 0.22 m/s: README 记录过 2.53 m/s 下轮子打滑
+      # 会让 odom 在一秒内漂 2.5 m, 远超扫描匹配的搜索窗口。
+      # 手动建图实测 0.19 m/s 稳定, 这里留一点余量。
+      max_vel_x: 0.22
+      min_vel_x: 0.0
+      max_vel_y: 0.0
+      min_vel_y: 0.0
+      max_speed_xy: 0.22
+      min_speed_xy: 0.0
+      max_vel_theta: 1.0
+      min_speed_theta: 0.0
+
+      # 加速度上限刻意压到 1.0 (默认 2.5)。
+      # 底盘俯仰行程是 +-1.337 度(万向轮间隙 3.5mm / 力臂 0.15m),
+      # 加速时车会后仰到后万向轮, 光束世界仰角变成 +1.000+1.337 = +2.337 度,
+      # 从 0.1878m 高处越过 0.25m 障碍的距离只有 1.52m ——
+      # 也就是说急加速会让 /scan 暂时看不见矮障碍物。
+      # 压低加速度直接压低这个仰角, 是本项目特有的约束, 不要照抄默认值。
+      acc_lim_x: 1.0
+      acc_lim_y: 0.0
+      acc_lim_theta: 2.0
+      decel_lim_x: -1.0
+      decel_lim_y: 0.0
+      decel_lim_theta: -2.0
+
+      vx_samples: 20
+      vy_samples: 1
+      vtheta_samples: 20
+      sim_time: 1.7
+      linear_granularity: 0.05      # = 地图分辨率
+      angular_granularity: 0.025
+      transform_tolerance: 0.2
+      xy_goal_tolerance: 0.15
+      trans_stopped_velocity: 0.25
+      short_circuit_trajectory_evaluation: true
+      stateful: true
+
+      critics: ["RotateToGoal", "Oscillation", "BaseObstacle", "GoalAlign",
+                "PathAlign", "PathDist", "GoalDist"]
+      BaseObstacle.scale: 0.02
+      PathAlign.scale: 32.0
+      PathAlign.forward_point_distance: 0.1
+      GoalAlign.scale: 24.0
+      GoalAlign.forward_point_distance: 0.1
+      PathDist.scale: 32.0
+      GoalDist.scale: 24.0
+      RotateToGoal.scale: 32.0
+      RotateToGoal.slowing_factor: 5.0
+      RotateToGoal.lookahead_time: -1.0
+
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      use_sim_time: true
+      update_frequency: 5.0
+      publish_frequency: 2.0
+      global_frame: odom
+      robot_base_frame: base_link
+      rolling_window: true
+      # 3x3 m 滚动窗口: 房间才 10x8, 再大没意义;
+      # 半径 1.5m 远大于 0.22m/s 下 1.7s 的仿真轨迹长度(0.37m), 够用。
+      width: 3
+      height: 3
+      resolution: 0.05          # 与地图一致, 避免重采样
+      robot_radius: 0.25
+      plugins: ["obstacle_layer", "inflation_layer"]
+
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: true
+        observation_sources: scan
+        scan:
+          topic: /scan
+          max_obstacle_height: 2.0
+          clearing: true
+          marking: true
+          data_type: "LaserScan"
+          raytrace_max_range: 12.0
+          raytrace_min_range: 0.3
+          obstacle_max_range: 10.0
+          obstacle_min_range: 0.3
+
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        cost_scaling_factor: 3.0
+        inflation_radius: 0.40
+
+      always_send_full_costmap: true
+
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      use_sim_time: true
+      update_frequency: 1.0
+      publish_frequency: 1.0
+      global_frame: map
+      robot_base_frame: base_link
+      robot_radius: 0.25
+      resolution: 0.05
+      track_unknown_space: true
+      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
+
+      static_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        map_subscribe_transient_local: true
+
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: true
+        observation_sources: scan
+        scan:
+          topic: /scan
+          max_obstacle_height: 2.0
+          clearing: true
+          marking: true
+          data_type: "LaserScan"
+          raytrace_max_range: 12.0
+          raytrace_min_range: 0.3
+          obstacle_max_range: 10.0
+          obstacle_min_range: 0.3
+
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        cost_scaling_factor: 3.0
+        inflation_radius: 0.40
+
+      always_send_full_costmap: true
+
+behavior_server:
+  ros__parameters:
+    use_sim_time: true
+    local_costmap_topic: local_costmap/costmap_raw
+    global_costmap_topic: global_costmap/costmap_raw
+    local_footprint_topic: local_costmap/published_footprint
+    global_footprint_topic: global_costmap/published_footprint
+    cycle_frequency: 10.0
+    behavior_plugins: ["spin", "backup", "drive_on_heading", "wait"]
+    spin:
+      plugin: "nav2_behaviors::Spin"
+    backup:
+      plugin: "nav2_behaviors::BackUp"
+    drive_on_heading:
+      plugin: "nav2_behaviors::DriveOnHeading"
+    wait:
+      plugin: "nav2_behaviors::Wait"
+    local_frame: odom
+    global_frame: map
+    robot_base_frame: base_link
+    transform_tolerance: 0.1
+    simulate_ahead_time: 2.0
+    max_rotational_vel: 1.0
+    min_rotational_vel: 0.4
+    rotational_acc_lim: 2.0
+
+bt_navigator:
+  ros__parameters:
+    use_sim_time: true
+    global_frame: map
+    robot_base_frame: base_link
+    odom_topic: /odom
+    bt_loop_duration: 10
+    default_server_timeout: 20
+    navigators: ["navigate_to_pose", "navigate_through_poses"]
+    navigate_to_pose:
+      plugin: "nav2_bt_navigator::NavigateToPoseNavigator"
+    navigate_through_poses:
+      plugin: "nav2_bt_navigator::NavigateThroughPosesNavigator"
+

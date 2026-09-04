@@ -32,9 +32,16 @@ hand-checking numbers that looked plausible but weren't.
 - **Purpose-built indoor world**: 10 m × 8 m walled room with internal walls,
   plus objects at deliberately chosen heights to exercise the 3D LiDAR
 - **2D SLAM** with `slam_toolbox` (async, Ceres solver, loop closure enabled)
-- **Saved occupancy grid** ready for Nav2 (`maps/my_map.yaml` + `.pgm`)
+- **Saved occupancy grid** (`maps/my_map.yaml` + `.pgm`)
+- **Autonomous navigation** with Nav2 — AMCL localization, NavFn global planner,
+  DWB local planner, dual costmaps — with every parameter derived from this
+  robot's geometry and this room's tightest passage
+- **Headless mode** (`gazebo.launch.py headless:=true`) so the whole stack can
+  be verified without a display
 - **Automated physics diagnostic** (`scripts/teleport_test.py`) that drives a
   fixed motion sequence and compares wheel odometry against Gazebo ground truth
+- **Map measurement** (`scripts/map_slice_check.py`) that recomputes every
+  occupancy figure in this file from the world file and the URDF
 
 ## Tech Stack
 
@@ -76,9 +83,12 @@ my_robot_description/
 ├── urdf/my_robot.urdf           # robot model + DiffDrive / JointState / LiDAR plugins
 ├── worlds/my_world.sdf          # 10×8 m indoor room with 3D structure
 ├── launch/
-│   ├── gazebo.launch.py         # Gazebo + robot spawn + ros_gz_bridge
-│   └── slam.launch.py           # slam_toolbox + lifecycle manager + RViz
-├── config/slam_params.yaml      # slam_toolbox tuning
+│   ├── gazebo.launch.py         # Gazebo + robot spawn + ros_gz_bridge (headless:=true supported)
+│   ├── slam.launch.py           # slam_toolbox + lifecycle manager + RViz
+│   └── nav2.launch.py           # AMCL + costmaps + planner + controller + RViz
+├── config/
+│   ├── slam_params.yaml         # slam_toolbox tuning
+│   └── nav2_params.yaml         # Nav2 tuning — every value derived, see Design Notes
 ├── rviz/slam.rviz               # RViz layout (map / scan / TF / robot)
 ├── maps/                        # saved occupancy grid
 │   ├── my_map.yaml
@@ -142,6 +152,38 @@ ros2 run nav2_map_server map_saver_cli \
 ros2 service call /slam_toolbox/serialize_map \
   slam_toolbox/srv/SerializePoseGraph \
   "{filename: '/home/$USER/maps/my_map_posegraph'}"
+```
+
+### Autonomous navigation
+
+Once a map is saved, `slam.launch.py` is no longer needed — Nav2 localizes
+against the saved grid instead of building a new one:
+
+```bash
+# Terminal 1
+ros2 launch my_robot_description gazebo.launch.py
+
+# Terminal 2 — AMCL + costmaps + planner + controller, opens RViz
+ros2 launch my_robot_description nav2.launch.py
+```
+
+Click **2D Goal Pose** in the RViz toolbar and pick a point. There is no need
+to set an initial pose first: `set_initial_pose` is on in `nav2_params.yaml`,
+because the robot always spawns at the origin.
+
+To drive it from the command line instead:
+
+```bash
+ros2 action send_goal /navigate_to_pose nav2_msgs/action/NavigateToPose \
+  "{pose: {header: {frame_id: map}, pose: {position: {x: 2.0, y: 1.0}, orientation: {w: 1.0}}}}"
+```
+
+Both launch files take arguments for unattended runs — `headless:=true` skips
+the Gazebo GUI, `rviz:=false` skips RViz:
+
+```bash
+ros2 launch my_robot_description gazebo.launch.py headless:=true
+ros2 launch my_robot_description nav2.launch.py rviz:=false
 ```
 
 ## Results
@@ -257,6 +299,33 @@ caster clearance was supposed to buy.
 > geometry from the *current* URDF and cannot tell what a saved `.pgm` was
 > built with, so it prints both and leaves the comparison to you — check them
 > against each other before quoting either.
+
+### Navigation
+
+Verified end to end against a headless simulation — Gazebo with `-s`, Nav2 with
+`rviz:=false`, goal sent over the action interface, nothing clicked by hand:
+
+| Check | Result |
+|---|---|
+| Lifecycle nodes reaching `active` | 6 / 6 |
+| Goal | `(2.000, 1.000)` in `map` |
+| Final pose (Gazebo ground truth) | `(1.886, 0.888)` |
+| Distance from goal | 0.160 m (`xy_goal_tolerance` 0.15) |
+| `/odom` vs ground truth at the goal | **8.6 mm** over a ~2.2 m drive (**0.39 %**) |
+| Resting pitch after the drive | **1.3367°** vs 1.3367° predicted |
+
+The goal checker is `stateful`, so it latches the moment the robot first falls
+inside 0.15 m and the robot coasts a few centimetres past — hence a final
+distance slightly outside the tolerance it reported success on.
+
+Two of these rows are independent confirmations of earlier work rather than new
+results. The 0.39 % odometry error is the same wheel-odometry chain the
+[odometry accuracy](#odometry-accuracy) section measured at 1.08 % over a harder
+sequence. The 1.3367° resting pitch is the number
+[the caster clearance was chosen to produce](#a-mechanical-clearance-silently-aims-the-sensor),
+and it was read here *after* the robot had driven and stopped at a yaw of about
+10.5° — so it is a fresh measurement of a prediction made before Nav2 existed,
+not a re-reading of the same one.
 
 ## Design Notes
 
@@ -410,6 +479,48 @@ kept clear so `teleport_test.py` can run its whole sequence in place (its
 trajectory stays within 1.21 m of the origin, with 0.45 m of clearance to the
 nearest wall).
 
+### Nav2 parameters are derived, not defaulted
+
+Three numbers in `config/nav2_params.yaml` come from this robot and this room
+rather than from a tutorial:
+
+**`robot_radius: 0.25`** — the chassis is 0.4 × 0.3 m, so its corner sits at
+`√(0.20² + 0.15²)` = 0.250 m. The wheels reach 0.206 m and the casters 0.20 m,
+both smaller, so the chassis corner *is* the circumscribed radius. A circular
+approximation rather than a polygon footprint, because a differential drive
+turning in place sweeps its whole polygon anyway.
+
+**`inflation_radius: 0.40`, with a hard ceiling of 0.50** — the tightest
+passage in the world is between the west end of `wall_inner_a` at `x = −4.0`
+and the west wall's inner surface at `x = −5.0`: exactly 1.0 m, so its
+centreline is 0.50 m from each side. An inflation radius at or above 0.50 m
+raises the cost of *every* cell in that passage, and the planner starts
+detouring or calling it impassable. 0.40 m leaves a genuinely zero-cost
+centreline.
+
+**`acc_lim_x: 1.0`** (the usual default is 2.5) — this one is specific to the
+sensor geometry described above. The pitch envelope is ±1.337°, and
+accelerating rotates the chassis *nose-up* onto the rear caster, which puts
+`/scan` at `+1.000° + 1.337° = +2.337°` from a LiDAR lifted to 0.1878 m. That
+beam clears a 0.25 m obstacle beyond 1.52 m — so hard acceleration briefly
+blinds the robot to low obstacles at exactly the range it is accelerating
+toward. Capping acceleration caps the pitch, which caps the blind band.
+
+Also worth stating: `nav2.launch.py` starts six nodes itself rather than
+including `nav2_bringup`'s `navigation_launch.py`. That launch file brings up
+ten lifecycle nodes in Jazzy, including `route_server` (which wants a graph
+GeoJSON that the launch file provides no default for) and `docking_server`.
+`lifecycle_manager` requires *every* name in `node_names` to activate, so one
+unconfigured node leaves the entire stack inactive — and the symptom is not an
+error, it is goals silently doing nothing.
+
+Skipping `nav2_bringup` also skips its `cmd_vel` chain
+(`cmd_vel_nav → velocity_smoother → cmd_vel_smoothed → collision_monitor →
+cmd_vel`). `controller_server` publishes straight to `/cmd_vel`, which is what
+the bridge already expects. That chain hides a trap for this robot in
+particular: `collision_monitor` defaults to `base_frame_id: base_footprint`,
+and this TF tree has no such frame — only `odom → base_link`.
+
 ## Debugging Log
 
 The parts of this project that took the longest were not the parts that
@@ -561,5 +672,17 @@ intuitive fix; determinism was the useful one.
   tuning localization.
 - [x] ~~Record a new demo GIF (the existing one predates the SLAM work).~~
   Done — `demo_map.gif`, see [Demo](#demo).
-- [ ] Nav2 integration: AMCL localization against the saved map, then
-  autonomous navigation.
+- [x] ~~Nav2 integration: AMCL localization against the saved map, then
+  autonomous navigation.~~ Done — `nav2.launch.py` + `config/nav2_params.yaml`,
+  verified headless: 6/6 lifecycle nodes active, goal reached to 0.16 m. See
+  [Navigation](#navigation).
+- [ ] **Nav2 has only been driven to one goal.** Reaching `(2.0, 1.0)` across
+  open floor exercises the planner and the controller, but not recovery
+  behaviours, not the 1.0 m passage west of `wall_inner_a`, and not the west
+  wall's occlusion gap. A sequence of goals through the tight passage is the
+  next real test.
+- [ ] **AMCL is never actually challenged.** The robot spawns at the origin,
+  `set_initial_pose` hands it the right answer, and wheel odometry is accurate
+  to 0.39 %, so the particle filter has nothing to correct. Localization is
+  untested until the initial pose is deliberately wrong or the odometry is
+  deliberately degraded.
