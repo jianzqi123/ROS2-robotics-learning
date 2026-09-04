@@ -124,11 +124,16 @@ Press `x` nine times to bring the speed down from 0.50 to ≈0.19 m/s before
 driving. Follow the perimeter first, then the interior, then return near the
 origin so `slam_toolbox` can close the loop.
 
-Save the map when coverage looks complete:
+Save the map when coverage looks complete. Use an absolute path — `-f` is
+resolved against the shell's working directory, not the workspace, and this
+terminal is usually not the one you built in. A wrong path fails *after*
+`map_io` has already logged `Received a … map`, which reads like a successful
+save right up to the `Failed to write map` line:
 
 ```bash
 # Nav2 occupancy grid — this is what Nav2 consumes later
-ros2 run nav2_map_server map_saver_cli -f src/my_robot_description/maps/my_map \
+ros2 run nav2_map_server map_saver_cli \
+  -f ~/ros2_ws/src/my_robot_description/maps/my_map \
   --ros-args -p save_map_timeout:=10000.0 -p use_sim_time:=true
 
 # slam_toolbox pose graph — for resuming mapping or relocalizing.
