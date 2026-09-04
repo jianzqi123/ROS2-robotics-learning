@@ -171,13 +171,31 @@ The saved grid is 203 × 163 cells at 0.05 m/px:
 |---|---|---|
 | Map extent | 10.15 m × 8.15 m | 10 m × 8 m interior + 0.15 m wall |
 | Aspect ratio | 1.2454 | 1.2500 (0.37 % error) |
-| Wall completeness | 100 % on all four walls | — |
-| Scale anisotropy | 0.00 % | — |
+| East–west inner span | **10.000 m** | 10.000 m |
+| North–south inner span | **8.000 m** | 8.000 m |
+| Scale anisotropy | **0.00 %** | — |
+| Wall completeness | 98.5 / 99.4 / 90.6 / 87.1 % (N/E/S/W) | — |
 
-`origin: [-5.061, -4.066, 0]` puts the grid edges at ±5.089 / ±4.084 — exactly
-one wall thickness outside the ±5.0 / ±4.0 interior, which is where the LiDAR
-sees the inner wall surface. Zero scale anisotropy indicates loop closure
-converged; a map with unclosed drift stretches along the travel direction.
+Both spans land on ground truth exactly and the two scale factors agree to four
+decimal places, so loop closure converged — an unclosed map stretches along the
+travel direction and the two scales separate.
+
+Wall completeness is *not* 100 %, and the gaps are not coverage failures. The
+south wall's 9.4 % gap sits behind `cylinder1`, which stands 0.5 m off that wall
+and subtends 1.0 m of its 10.15 m length — 9.9 % predicted against 9.4 %
+measured. The west wall's 12.9 % gap sits behind `shelf`, 0.6 m off the wall and
+1.6 m wide, or 19.6 % of that wall; the measured gap is smaller because the
+robot sees part way around it from oblique angles. Both are occlusion, which is
+what a 2D scan from a single height does when something stands in front of a
+wall.
+
+`origin: [-5.056, -4.072, 0]` puts the grid edges at x ∈ [−5.056, +5.094] and
+y ∈ [−4.072, +4.078] — 1 to 2 cells beyond the ±5.0 / ±4.0 inner wall surfaces,
+and so still inside the walls' 0.15 m thickness. That 1–2 cell overshoot is the
+same occupancy band thickness measured on every solid object in the next
+section, arrived at independently.
+
+All of the above is produced by `scripts/map_slice_check.py`.
 
 ### The 2D map is a slice, and it shows
 
@@ -192,27 +210,36 @@ python3 src/my_robot_description/scripts/map_slice_check.py
 
 | Object | Height | Footprint | Occupied | Thin-shell | Band | Sides seen |
 |---|---|---|---|---|---|---|
-| `box1` | 0.00–1.00 m | 21×21 | 22.7 % | 18.1 % | 1.25× | 4/4 |
-| `box2` | 0.00–1.00 m | 21×21 | 22.0 % | 18.1 % | 1.21× | 4/4 |
-| `cylinder1` | 0.00–1.00 m | 21×21 | 16.8 % | 18.1 % | 0.93× | 3/4 |
-| `shelf` | 0.00–2.00 m | 9×33 | 26.6 % | 26.9 % | 0.99× | 4/4 |
-| `crates` | 0.00–1.00 m | 13×13 | 27.8 % | 28.4 % | 0.98× | 4/4 |
-| `platform` | 0.00–0.25 m | 25×25 | 14.9 % | 15.4 % | 0.97× | 4/4 |
-| `table1` | 0.00–0.78 m | 25×17 | **5.2 %** | 18.8 % | **0.28×** | 2/4 |
+| `box1` | 0.00–1.00 m | 21×21 | 21.1 % | 18.1 % | 1.16× | 3/4 |
+| `box2` | 0.00–1.00 m | 21×21 | 21.8 % | 18.1 % | 1.20× | 4/4 |
+| `cylinder1` | 0.00–1.00 m | 21×21 | 17.9 % | 18.1 % | 0.99× | 2/4 |
+| `shelf` | 0.00–2.00 m | 9×33 | 25.3 % | 26.9 % | 0.94× | 3/4 |
+| `crates` | 0.00–1.00 m | 13×13 | 32.0 % | 28.4 % | 1.12× | 3/4 |
+| `platform` | 0.00–0.25 m | 25×25 | 16.8 % | 15.4 % | 1.09× | 4/4 |
+| `table1` | 0.00–0.78 m | 25×17 | **4.7 %** | 18.8 % | **0.25×** | 3/4 |
 | `overhead_beam` | 1.10–1.30 m | 41×5 | **0.0 %** | 42.9 % | **0.00×** | 0/4 |
 
 **Thin-shell** is the fraction of the footprint that its boundary ring occupies
 — what a 2D scan *should* mark, since it only ever sees a solid object's outer
 surface. **Band** is occupied ÷ ring: 1.0 means exactly a one-cell shell.
 
-Every solid object lands between 0.93× and 1.25×. That single fact is the
+Every solid object lands between 0.94× and 1.20×. That single fact is the
 section's real result: the map is a one-cell outline of whatever the beam plane
-intersects, and the small excess on `box1` / `box2` is pose uncertainty
-smearing the shell to slightly over one cell. Against that baseline the two
-deliberate cases stand out unambiguously — `table1` at 0.28× is four leg posts
-and no tabletop, and `overhead_beam` at 0.00× is simply not there. These are
-not gaps in coverage; they are the consequence of sampling the world at one
-height.
+intersects, and the small excess is pose uncertainty smearing the shell to
+slightly over one cell. Against that baseline the two deliberate cases stand
+out unambiguously — `table1` at 0.25× is four leg posts and no tabletop, and
+`overhead_beam` at 0.00× is simply not there. These are not gaps in coverage;
+they are the consequence of sampling the world at one height.
+
+**The result reproduces across two independent mapping runs at two different
+beam elevations.** The same script run on the earlier map — a different drive,
+at `−0.909°` instead of `−0.337°` — gives 0.93× to 1.25× for the same six solid
+objects, 0.28× for `table1` and 0.00× for `overhead_beam`. A single run could
+have been a coincidence of one trajectory; two cannot. The one row that visibly
+improved is `platform`: 0.97× and a partial outline at `−0.909°`, 1.09× with
+all four sides seen at `−0.337°`. Flattening the beam brought the 0.25 m step
+into line with every other solid object, which is exactly what shrinking the
+caster clearance was supposed to buy.
 
 > **The earlier version of this table was wrong, and the script is why it is
 > not wrong now.** It reported `box1` at 50.6 % and `box2` at 71.1 % against a
@@ -223,12 +250,12 @@ height.
 > written down, so it could not be checked. Nothing about the sensor needed
 > explaining; the measurement did.
 >
-> **These figures are from the pre-`6262d5d` map.** `maps/my_map.pgm` and
-> `demo_map.gif` were both recorded at the old 5 mm caster clearance, i.e. a
-> net `/scan` elevation of `−0.909°`; the current geometry is `−0.337°`. The
-> script reads beam geometry from the *current* URDF and cannot tell what a
-> saved `.pgm` was built with, so it prints both and leaves the comparison to
-> you. Re-run it after regenerating the map.
+> **`demo_map.gif` still shows the old geometry.** `maps/my_map.pgm` has been
+> regenerated at the current `−0.337°`, but the GIF was recorded during the
+> earlier `−0.909°` run and has not been re-shot. The script reads beam
+> geometry from the *current* URDF and cannot tell what a saved `.pgm` was
+> built with, so it prints both and leaves the comparison to you — check them
+> against each other before quoting either.
 
 ## Design Notes
 
@@ -502,10 +529,16 @@ intuitive fix; determinism was the useful one.
   limit, so floor returns are impossible rather than merely unlikely. The +1°
   beam is deliberately left alone — it matches a real VLP-16. Verified against
   a running sim: 1.33659° measured against 1.33666° predicted.
-- [ ] **Regenerate the map and re-measure the slice table.** `maps/my_map.pgm`,
-  `demo_map.gif` and every figure in [Results](#results) were produced at the
-  old −0.909° elevation. Nav2 should localize against a map built with the
-  geometry it will actually run.
+- [x] ~~**Regenerate the map and re-measure the slice table.**~~ Done:
+  `maps/my_map.pgm` is now a fresh run at the current −0.337° elevation, and
+  every figure in [Results](#results) was re-measured from it with
+  `map_slice_check.py`. Scale anisotropy 0.00 %, both inner spans exact.
+- [ ] **Re-record `demo_map.gif`.** It is still the −0.909° run. Everything
+  else in this file has moved to the current geometry.
+- [ ] **`wall_completeness` is 87–99 %, not 100 %.** The gaps are occlusion by
+  `shelf` and `cylinder1` (see [Map quality](#map-quality)), so nothing is
+  broken — but Nav2 will plan against those gaps, and a costmap that thinks
+  there is a hole in the west wall is worth knowing about before it matters.
 - [x] ~~**Re-derive the `platform` occupancy figure.**~~ Resolved by
   `scripts/map_slice_check.py`, which derives footprints from the world file and
   beam geometry from the URDF, and states its metric. Re-measuring the same map

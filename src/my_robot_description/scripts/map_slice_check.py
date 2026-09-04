@@ -274,6 +274,61 @@ def measure(name, parts, meta, occ, free, unknown):
     }
 
 
+def measure_walls(models, meta, occ):
+    """
+    量四面外墙: 完整度 + 尺度各向异性。
+
+    完整度: 沿墙的长轴逐格看, 该处横跨墙厚的那一列里有没有占据格。
+            缺口意味着那一段墙从没被扫到, 不是"扫到但标错"。
+    各向异性: 用东西内表面间距 / 10.0 和南北内表面间距 / 8.0 两个比例尺相比。
+            闭环没收敛的图会沿行进方向被拉长, 两个比例尺就不相等。
+    """
+    res = float(meta['resolution'])
+    shape = occ.shape
+    out, inner = {}, {}
+    for name in ('wall_north', 'wall_south', 'wall_east', 'wall_west'):
+        if name not in models:
+            continue
+        parts = models[name]['parts']
+        xmin = min(p[0] for p in parts)
+        xmax = max(p[1] for p in parts)
+        ymin = min(p[2] for p in parts)
+        ymax = max(p[3] for p in parts)
+        r_hi, c_lo = world_to_cell(xmin, ymin, meta, shape)
+        r_lo, c_hi = world_to_cell(xmax, ymax, meta, shape)
+        r_lo, r_hi = max(0, min(r_lo, r_hi)), min(shape[0] - 1, max(r_lo, r_hi))
+        c_lo, c_hi = max(0, min(c_lo, c_hi)), min(shape[1] - 1, max(c_lo, c_hi))
+        sub = occ[r_lo:r_hi + 1, c_lo:c_hi + 1]
+        if sub.size == 0:
+            continue
+        horizontal = sub.shape[1] >= sub.shape[0]
+        # 长轴上每一格是否至少有一个占据格
+        hit = sub.any(axis=0) if horizontal else sub.any(axis=1)
+        out[name] = 100.0 * float(hit.mean())
+        # 内表面: 朝房间中心那一侧最靠内的占据格
+        rows, cols = np.nonzero(sub)
+        if rows.size:
+            if name == 'wall_north':
+                inner[name] = (r_lo + rows.max())
+            elif name == 'wall_south':
+                inner[name] = (r_lo + rows.min())
+            elif name == 'wall_east':
+                inner[name] = (c_lo + cols.min())
+            elif name == 'wall_west':
+                inner[name] = (c_lo + cols.max())
+
+    aniso = None
+    if all(k in inner for k in ('wall_east', 'wall_west', 'wall_north', 'wall_south')):
+        span_x = (inner['wall_east'] - inner['wall_west']) * res
+        span_y = (inner['wall_south'] - inner['wall_north']) * res
+        sx, sy = span_x / 10.0, span_y / 8.0
+        aniso = {
+            'span_x': span_x, 'span_y': span_y, 'sx': sx, 'sy': sy,
+            'pct': 100.0 * abs(sx - sy) / ((sx + sy) / 2),
+        }
+    return out, aniso
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--map', default=DEFAULT_MAP)
@@ -315,6 +370,20 @@ def main():
     print(f"  {occ.shape[1]} x {occ.shape[0]} 格 @ {meta['resolution']} m"
           f"  origin {meta['origin'][:2]}")
     print('=' * 72)
+
+    walls, aniso = measure_walls(models, meta, occ)
+    if walls:
+        print('外墙完整度 (长轴上有占据格的比例):')
+        for k, v in walls.items():
+            print(f"  {k:<14}{v:6.1f} %")
+    if aniso:
+        print(f"  东西内表面间距  {aniso['span_x']:.3f} m  (真值 10.000)"
+              f"  比例尺 {aniso['sx']:.4f}")
+        print(f"  南北内表面间距  {aniso['span_y']:.3f} m  (真值  8.000)"
+              f"  比例尺 {aniso['sy']:.4f}")
+        print(f"  尺度各向异性    {aniso['pct']:.2f} %"
+              f"   ({'闭环已收敛' if aniso['pct'] < 1.0 else '⚠ 疑似闭环未收敛'})")
+        print()
 
     rows = []
     for name in TARGETS:
