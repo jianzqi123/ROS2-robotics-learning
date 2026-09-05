@@ -45,6 +45,9 @@ hand-checking numbers that looked plausible but weren't.
 - **Unattended navigation test** (`scripts/nav2_test.py`) that drives a goal
   sequence through the map's tightest passage and measures AMCL's recovery
   from a deliberately wrong initial pose
+- **Wheel-slip detection** (`scripts/slip_monitor.py`) that catches the wheels
+  turning while the robot is not moving, using `/scan` rather than the wheel
+  encoders that are lying
 
 ## Tech Stack
 
@@ -98,8 +101,9 @@ my_robot_description/
 │   └── my_map.pgm
 ├── scripts/
 │   ├── teleport_test.py         # automated physics-stability diagnostic
-│   ├── map_slice_check.py       # occupancy measurement for the slice table
-│   └── nav2_test.py             # unattended navigation + AMCL convergence test
+│   ├── map_slice_check.py       # occupancy measurement + passage clearance
+│   ├── nav2_test.py             # unattended navigation + AMCL convergence test
+│   └── slip_monitor.py          # wheel-slip detection from /scan
 ├── demo_map.gif                 # SLAM mapping run (Demo section above)
 ├── demo_lidar.gif               # earlier build: raw 16-beam point cloud
 ├── package.xml                  # dependencies — keep in sync with the launch files
@@ -361,6 +365,45 @@ confirmations: `/odom` tracked ground truth to **8.6 mm over 2.2 m (0.39 %)**,
 and resting pitch measured **1.3367°** against 1.3367° predicted — read after
 the robot had driven and stopped at ~10.5° of yaw, so it is a fresh test of a
 prediction made before Nav2 existed, not a re-reading of the same measurement.
+
+### Slip detection
+
+`scripts/slip_monitor.py` answers the question the previous section leaves
+open: how do you know the wheels are turning without the robot moving?
+
+Not from `/joint_states`. The wheels reach commanded speed regardless of
+traction, so during slip the command and the joint velocity agree exactly. Any
+detector has to bring in a measurement that does not pass through the wheels —
+here, `/scan`.
+
+The threshold is derived rather than tuned. For a translation of `d`, a beam at
+angle θ striking a distant surface changes its range by about `−d·cos(θ − θ₀)`;
+averaging `|Δrange|` over a full revolution gives `(2/π)·d ≈ 0.637·d`. So
+odometry itself predicts how much the scan should change. Measure far below
+that prediction and the wheels are turning while the robot is not moving.
+
+That figure is a **lower bound**, not a tight prediction: in a real room beams
+sweep across object edges, where a few centimetres of travel swings a range by
+metres. Measured ratios while driving freely are 2.24–2.92, not 1.0. The
+detector only uses the "far below" side, so a lower bound is exactly the right
+shape — the closest normal reading sat 8× above the 0.30 threshold.
+
+Verified by driving into `box1` under a headless sim, with a pass criterion
+that checks a derived position rather than a chosen number — `box1`'s west face
+is at `x = 2.5` and the chassis half-length is 0.2 m, so a wedged robot must
+come to rest at `x = 2.3`:
+
+| Phase | Result |
+|---|---|
+| Free driving, 6 s | **0 false alarms** over 25 evaluations, ratios 2.24–2.92 |
+| Wedged against `box1`, 14 s | **15 detections**, scan change 0.0 cm against 12.7 cm predicted |
+| Final ground-truth pose | `x = 2.2989` against the 2.30 contact point — **1.1 mm** |
+
+Scope, stated rather than implied: this detects *translational* slip only.
+Under pure rotation the scan change depends on the environment's angular
+structure, with no clean analytic expectation, so the monitor abstains when the
+yaw component is large. The failure that motivated it — wedged under `table1`
+with odometry 9 m out — was translational.
 
 ### Where navigation actually breaks
 
@@ -809,11 +852,19 @@ intuitive fix; determinism was the useful one.
   below.
 - [x] ~~**The tight passage was traversed, not stressed.**~~ Stressed — five
   more passes, three of them angled. Worst clearance 15.4 cm.
-- [ ] **`inflation_radius: 0.30` is derived but unvalidated.** The 0.40 defect
-  is proven — 419 trajectories rejected in the 0.90 m `platform` gap. The
-  replacement has had exactly one stress run and that run ended badly, in a way
-  that may or may not be its fault. Needs several clean runs before it can be
-  called a fix.
+- [ ] **`inflation_radius: 0.30` is derived but unvalidated, and the run that
+  looked like evidence against it was contaminated.** The 0.40 defect is proven
+  — 419 trajectories rejected in the 0.90 m `platform` gap. The replacement had
+  one stress run that ended with the robot wedged and odometry 9 m out. That
+  run is now suspect: **seven orphaned `gz sim` servers were found running
+  simultaneously**, the oldest for over an hour, because the cleanup pattern
+  used `/gz sim` while the real process is `gz sim -s -r …` with no leading
+  slash — killing only the shell wrapper and orphaning the child. The
+  signatures were all there and were misread at the time: `/scan` publishing at
+  20 Hz against a 10 Hz sensor, `/odom` holding a stale value, `gz model`
+  returning nothing because the model name was ambiguous, `TF_OLD_DATA`
+  everywhere. Any result from that window has to be re-taken before it means
+  anything.
 - [ ] **Wheel slip destroys localization, and Nav2 reports success anyway.**
   In that run three position sources disagreed completely: ground truth
   `(3.00, 2.57)` — physically wedged under `table1` — against `/odom`
@@ -822,8 +873,17 @@ intuitive fix; determinism was the useful one.
   against an obstacle, exactly the failure this file documents from the SLAM
   work. AMCL's motion model followed it to `(-4.46, -2.88)` and the action then
   reported SUCCEEDED 8.5 m from the goal — success in AMCL's hallucination, not
-  in the room. Wheel-slip detection (comparing commanded velocity against
-  `/joint_states` velocity, now that it is bridged) would catch this.
+  in the room. **Detection now exists** — `scripts/slip_monitor.py`, see
+  [Slip detection](#slip-detection). Wiring it into Nav2 as a preemptive abort
+  is the remaining work.
+
+  The earlier version of this entry proposed detecting slip by comparing
+  commanded velocity against `/joint_states`. **That does not work here.**
+  `gz-sim-diff-drive-system` is a velocity controller: the wheels reach the
+  commanded speed whether or not they have traction, so during slip those two
+  numbers agree perfectly. It is the same fact this file already records from
+  the SLAM work — odometry being self-consistent proves nothing — approached
+  from the other side.
 - [ ] **The robot cannot complete a detour after its route is blocked.** It
   escapes the passage, drives ~3 m east, then stops ~0.5 m short of
   `wall_inner_a`'s east tip and the goal is aborted. Reproduced three times to
