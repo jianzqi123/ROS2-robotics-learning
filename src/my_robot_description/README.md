@@ -378,7 +378,38 @@ east, then stopped at `x ≈ −1.5` — about 0.5 m short of the wall's east ti
 and the BT exhausted its recovery budget and aborted the goal. Reproduced
 three times, always ending within 0.1 m of the same spot.
 
-The logs say `Failed to make progress`, repeatedly, while the planner never
+**What the logs were actually saying.** Searching the Nav2 issue tracker for
+this failure turned up [#5054](https://github.com/ros-navigation/navigation2/issues/5054),
+which has no resolution but does contain the string worth grepping for:
+`No valid trajectories out of N!`. That string was already sitting in the logs
+— 28 times — and had simply never been searched for. It is DWB reporting that
+**every one of 419 sampled trajectories was rejected**, which is why no command
+reaches the wheels.
+
+The context around it names the spot: `Begin navigating from current location
+(-4.49, 0.36)`. That is inside the gap between the west wall at `x = −5.0` and
+`platform`'s west face at `x = −4.1` — **0.90 m wide, not the 1.00 m passage
+the inflation radius was derived from.** A distance-transform sweep of the
+world geometry (`map_slice_check.py` now reports it) gives the real bottlenecks:
+
+| Gap | Width | Centreline clearance | Zero-cost band at `inflation 0.40` |
+|---|---|---|---|
+| west wall ↔ `wall_inner_a` | 1.00 m | 0.500 m | 0.20 m |
+| **west wall ↔ `platform`** | **0.90 m** | **0.450 m** | **0.10 m** |
+| west wall ↔ `shelf` | 0.60 m | 0.300 m | none — but a dead end |
+
+The robot sat 0.39 m from `platform`, one centimetre outside a 0.10 m band, so
+every trajectory DWB simulated 1.7 s (0.37 m) ahead ran into inscribed cost.
+The original derivation named the wrong bottleneck; the `shelf` gap is tighter
+still but is a pocket sealed by the 0.20 m gap to the north wall, so it
+constrains nothing.
+
+`inflation_radius` is now 0.30, which gives that gap a 0.30 m band. **This is
+not yet validated** — see Known Issues; the one stress run made with it ended
+with the robot wedged under `table1` and `/odom` reading `(8.26, 6.72)`, a
+point outside a room that spans `x ∈ [−5, 5]`.
+
+The logs also say `Failed to make progress`, repeatedly, while the planner never
 once reports a failure. So paths exist and the controller cannot follow them.
 The obvious suspect was `SimpleProgressChecker`, whose 0.5 m / 10 s threshold
 cannot be met by a differential drive that has to rotate in place first — an
@@ -778,6 +809,21 @@ intuitive fix; determinism was the useful one.
   below.
 - [x] ~~**The tight passage was traversed, not stressed.**~~ Stressed — five
   more passes, three of them angled. Worst clearance 15.4 cm.
+- [ ] **`inflation_radius: 0.30` is derived but unvalidated.** The 0.40 defect
+  is proven — 419 trajectories rejected in the 0.90 m `platform` gap. The
+  replacement has had exactly one stress run and that run ended badly, in a way
+  that may or may not be its fault. Needs several clean runs before it can be
+  called a fix.
+- [ ] **Wheel slip destroys localization, and Nav2 reports success anyway.**
+  In that run three position sources disagreed completely: ground truth
+  `(3.00, 2.57)` — physically wedged under `table1` — against `/odom`
+  `(8.26, 6.72)`, a point *outside* a room spanning `x ∈ [−5, 5]`,
+  `y ∈ [−4, 4]`. Roughly 9 m of odometry accumulated while the wheels spun
+  against an obstacle, exactly the failure this file documents from the SLAM
+  work. AMCL's motion model followed it to `(-4.46, -2.88)` and the action then
+  reported SUCCEEDED 8.5 m from the goal — success in AMCL's hallucination, not
+  in the room. Wheel-slip detection (comparing commanded velocity against
+  `/joint_states` velocity, now that it is bridged) would catch this.
 - [ ] **The robot cannot complete a detour after its route is blocked.** It
   escapes the passage, drives ~3 m east, then stops ~0.5 m short of
   `wall_inner_a`'s east tip and the goal is aborted. Reproduced three times to

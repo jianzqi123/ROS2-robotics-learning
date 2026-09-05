@@ -8,10 +8,36 @@
 #       所以角点就是外接圆半径。用圆形近似而不是多边形足迹:
 #       差速车原地转弯时多边形足迹会扫过一片区域, 圆形近似天然覆盖这一点。
 #
-#   inflation_radius = 0.40 m  (硬上限 0.50)
-#       场地最窄通道是 wall_inner_a 西端(x=-4.0)到西墙内表面(x=-5.0)的 1.0 m。
-#       通道中线离两侧各 0.50 m。膨胀半径若 >= 0.50, 整条通道都会被抬成高代价,
-#       规划器会绕路甚至判定不可通行。取 0.40 留出一条真正零代价的中线。
+#   inflation_radius = 0.30 m
+#       这个值改过一次, 原因值得记下来 —— 原值 0.40 是照着"最窄通道是
+#       wall_inner_a 西端到西墙的 1.0 m、中线余量 0.50"推的, 而那个前提是错的:
+#       用距离变换把整个世界扫一遍(map_slice_check.py --clearance)才发现,
+#       真正卡人的是西墙(x=-5.0)到 platform 西面(x=-4.1)的 0.90 m 缝,
+#       中线余量只有 0.450。
+#
+#       零代价带宽 = 2 * (中线余量 - inflation_radius):
+#           inflation 0.40 -> platform 缝只剩 0.10 m, 车必须压在 ±5cm 内
+#           inflation 0.30 -> 0.30 m, 正常跟线就能待在里面
+#       实测后果: 压测时车停在 (-4.49, 0.36), 距 platform 0.39m —— 差 1cm
+#       就在带外, DWB 前推 1.7s(0.37m)的轨迹全部撞进 inscribed 区,
+#       日志刷 "No valid trajectories out of 419!" 直到 patience 耗尽。
+#       所以 419 条轨迹全灭不是 DWB 的毛病, 是膨胀半径把路堵死了。
+#
+#       还有一条 0.60m 的缝(西墙<->shelf, 中线余量 0.300), 但 shelf 北端到
+#       北墙只有 0.20m, 车过不去, 那是个死胡同, 不构成通行约束 —— 所以
+#       没有按它去压 inflation。
+#       下限: 必须 > robot_radius 0.25, 否则连缓冲都没有了。
+#
+#       !! 0.30 这个新值尚未通过压测验证 !!
+#       0.40 的缺陷是实证过的(419 条轨迹全灭), 但换成 0.30 之后唯一一次
+#       压测跑崩了, 而且崩的方式和膨胀半径未必有关: 车最后卡在 table1
+#       底下, /odom 漂到 (8.26, 6.72) —— 房间只有 x∈[-5,5] y∈[-4,4],
+#       那个位置在房间外面, 是轮子长时间空转积分出来的。AMCL 的运动模型
+#       跟着 odom 一起跑偏到 (-4.46,-2.88), 于是动作报"到达目标"而真实
+#       位置差了 8.5m。成功的是 AMCL 的幻觉, 不是导航。
+#       先后关系没有隔离清楚: 究竟是 0.30 让规划贴得太近导致卡住,
+#       还是先有别的原因导致跑偏、卡住只是后果, 需要多跑几轮才能分开。
+#       在此之前不要把 0.30 当成已验证的配置。
 #
 #   laser 有效距离 0.3 ~ 12.0 m
 #       0.3 是传感器 <range><min>; 12.0 略小于房间对角线 12.81 m ——
@@ -218,7 +244,7 @@ local_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.0
-        inflation_radius: 0.40
+        inflation_radius: 0.30
 
       always_send_full_costmap: true
 
@@ -257,7 +283,7 @@ global_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.0
-        inflation_radius: 0.40
+        inflation_radius: 0.30
 
       always_send_full_costmap: true
 

@@ -46,6 +46,9 @@ DEFAULT_MAP = os.path.join(PKG, 'maps', 'my_map.yaml')
 TARGETS = ['box1', 'box2', 'cylinder1', 'table1', 'shelf', 'platform',
            'overhead_beam', 'crates']
 
+# 与 nav2_params.yaml 保持一致: 底盘 0.4x0.3 的角点 sqrt(0.20^2+0.15^2)
+ROBOT_RADIUS = 0.25
+
 
 # ---------------------------------------------------------------- SDF 解析
 
@@ -329,6 +332,48 @@ def measure_walls(models, meta, occ):
     return out, aniso
 
 
+def clearance_report(models, res=0.01):
+    """
+    用距离变换找出场地真正的通行瓶颈, 用来定 inflation_radius。
+
+    为什么不能靠眼睛挑最窄的缝: 一开始就是这么定的 0.40, 结果挑错了 ——
+    盯上了 wall_inner_a 西端到西墙的 1.0m, 漏了西墙到 platform 的 0.90m。
+    代价是 DWB 在那条缝里找不出一条合法轨迹。把整个自由空间扫一遍
+    就不会再漏。
+
+    注意用世界几何而不是 my_map.pgm: 地图里实心物体只有一圈外轮廓,
+    内部是"自由"的, 距离变换会算出穿过物体内部的假通道。
+    """
+    try:
+        from scipy.ndimage import distance_transform_edt
+    except ImportError:
+        print('  (需要 scipy, 跳过通行余量分析)')
+        return
+
+    x0, x1, y0, y1 = -5.15, 5.15, -4.15, 4.15
+    w, h = int((x1 - x0) / res), int((y1 - y0) / res)
+    occ = np.zeros((h, w), bool)
+    for name, d in models.items():
+        if name == 'ground_plane':
+            continue
+        for (xa, xb, ya, yb, za, zb) in d['parts']:
+            if zb < 0.19:          # 低于雷达线的东西, 2D 导航看不见
+                continue
+            i0, i1 = max(0, int((ya - y0) / res)), min(h, int((yb - y0) / res) + 1)
+            j0, j1 = max(0, int((xa - x0) / res)), min(w, int((xb - x0) / res) + 1)
+            occ[i0:i1, j0:j1] = True
+
+    clear = distance_transform_edt(~occ) * res
+    print()
+    print('通行余量 (距离变换, 分辨率 %.0f cm):' % (res * 100))
+    print(f'  自由空间最大余量 {clear.max():.3f} m')
+    print(f'  {"半径":>7}{"可达面积 m^2":>14}')
+    for r in (ROBOT_RADIUS, 0.30, 0.35, 0.40, 0.45, 0.50):
+        print(f'  {r:>6.2f}{(clear >= r).sum() * res * res:>13.2f}')
+    print('  零代价带宽 = 2*(中线余量 - inflation_radius);')
+    print('  带宽 <=0 表示那条缝整段都是高代价, 规划器会绕路或贴着墙走。')
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--map', default=DEFAULT_MAP)
@@ -405,6 +450,8 @@ def main():
               f"{m['pct']:>8.1f}%{m['ring_pct']:>9.1f}%"
               f"{m['thickness']:>8.2f}{m['unk_pct']:>7.1f}%"
               f"   {s['N']:.2f}/{s['S']:.2f}/{s['W']:.2f}/{s['E']:.2f}")
+
+    clearance_report(models)
 
     print()
     print('判读:')

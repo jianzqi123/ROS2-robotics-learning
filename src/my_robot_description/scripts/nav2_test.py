@@ -36,10 +36,12 @@ Nav2 自动化验证 —— 把 README 里两条"没测过"变成测过的。
     此前 Nav2 只被送过一个目标点, 落在空地上, 既没考验规划器绕障,
     也没走过场地里唯一的窄通道。
     通道 = wall_inner_a 西端(x=-4.0) 到西墙内表面(x=-5.0) 的 1.0m 缺口,
-    位于 y≈-1.5。机器人外接半径 0.25, 膨胀半径 0.40, 中线离两侧各 0.50 ——
-    也就是说通道里只有一条勉强零代价的中线, 这正是 inflation_radius
-    必须小于 0.50 的原因。本测试逐段记录终点误差, 并检查轨迹是否真的
-    从通道里穿过去了(而不是绕远路从东边 x>-1.0 迂回)。
+    位于 y≈-1.5。本测试逐段记录终点误差, 并检查轨迹是否真的从通道里
+    穿过去了(而不是绕远路从东边 x>-1.0 迂回)。
+
+    注意这不是场地最窄处 —— 西墙到 platform 只有 0.90m,
+    见 map_slice_check.py 的通行余量分析。当初就是漏了那条缝,
+    把 inflation_radius 定成了 0.40, 结果 DWB 在里面找不出合法轨迹。
 
 测试2 AMCL 错误初始位姿
     此前 AMCL 从未被考验过: 车从原点出生, set_initial_pose 把正确答案
@@ -56,6 +58,7 @@ import math
 import re
 import subprocess
 import sys
+import threading
 import time
 
 import rclpy
@@ -81,7 +84,7 @@ PASSAGE_X = (-5.0, -4.0)
 PASSAGE_Y = (-1.9, -1.1)
 
 ROBOT_RADIUS = 0.25       # 与 nav2_params.yaml 一致
-INFLATION = 0.40          # 同上
+INFLATION = 0.30          # 同上
 
 PASSAGE_NORTH = (-4.5, 0.0)
 PASSAGE_SOUTH = (-4.5, -3.0)
@@ -112,17 +115,54 @@ STRESS_WAYPOINTS = [
 BAD_OFFSET = (0.8, -0.6, math.radians(25.0))
 
 
-def ground_truth_pose(model='my_robot'):
+def ground_truth_pose(model='my_robot', timeout=8):
     """从 Gazebo 取真实位姿 (x, y, yaw); 取不到返回 None。"""
     try:
         out = subprocess.run(['gz', 'model', '-m', model, '-p'],
-                             capture_output=True, text=True, timeout=15).stdout
+                             capture_output=True, text=True, timeout=timeout).stdout
     except (OSError, subprocess.SubprocessError):
         return None
     nums = re.findall(r'\[\s*(-?\d+\.\d+)\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)\s*\]', out)
     if len(nums) < 2:
         return None
     return float(nums[0][0]), float(nums[0][1]), float(nums[1][2])
+
+
+class GroundTruth:
+    """
+    后台线程持续采真值, 主循环只读缓存。
+
+    为什么必须这样: `gz model -m ... -p` 是 fork 一个进程去做 gz transport
+    发现, 实测单次要 5 秒。早期版本在导航循环里逐帧直接调它, 等于以 10Hz
+    的频率阻塞 rclpy.spin_once —— 动作反馈和结果都处理不过来, 于是每一段
+    都自己超时返回失败, 真值也取不到, 表格里全是 nan。
+    那不是导航坏了, 是测量手段把被测系统压垮了。
+    """
+
+    def __init__(self, period=1.0):
+        self.period = period
+        self.latest = None
+        self._stop = threading.Event()
+        self._t = threading.Thread(target=self._loop, daemon=True)
+        self._t.start()
+
+    def _loop(self):
+        while not self._stop.is_set():
+            p = ground_truth_pose()
+            if p:
+                self.latest = p
+            self._stop.wait(self.period)
+
+    def stop(self):
+        self._stop.set()
+
+    def wait_fresh(self, timeout=20.0):
+        """等一个新鲜采样, 用于段落收尾时确认终点。"""
+        self.latest = None
+        end = time.time() + timeout
+        while self.latest is None and time.time() < end:
+            time.sleep(0.2)
+        return self.latest
 
 
 def wrap_pi(a):
@@ -171,6 +211,7 @@ class Nav2Test(Node):
     def __init__(self):
         super().__init__('nav2_test')
         self.amcl_pose = None
+        self.gt = GroundTruth()
 
         # AMCL 发的是 transient_local, 订阅端 QoS 必须匹配, 否则收不到
         qos = QoSProfile(
@@ -230,8 +271,8 @@ class Nav2Test(Node):
         track, deadline = [], time.time() + timeout
         while rclpy.ok() and time.time() < deadline:
             rclpy.spin_once(self, timeout_sec=0.1)
-            gt = ground_truth_pose()
-            if gt:
+            gt = self.gt.latest
+            if gt and (not track or gt != track[-1]):
                 track.append(gt)
                 if on_sample:
                     on_sample(gt)
@@ -255,7 +296,7 @@ class Nav2Test(Node):
         for label, gx, gy in GOALS:
             print(f'  -> {label} ({gx}, {gy}) ...', flush=True)
             ok, track, _ = self.send_goal(gx, gy)
-            gt = ground_truth_pose()
+            gt = self.gt.wait_fresh()
             if gt is None:
                 print('     取不到 Gazebo 真值')
                 return False
@@ -315,7 +356,7 @@ class Nav2Test(Node):
         print(f'  -> 通道以南 {PASSAGE_SOUTH} , 途中封路 ...', flush=True)
         ok, track, recoveries = self.send_goal(*PASSAGE_SOUTH, timeout=420.0,
                                                on_sample=watch)
-        gt = ground_truth_pose()
+        gt = self.gt.wait_fresh()
         remove_blocker()
 
         if not state['dropped']:
@@ -351,7 +392,7 @@ class Nav2Test(Node):
         rows = []
         for i, (label, gx, gy) in enumerate(STRESS_WAYPOINTS):
             ok, track, rec = self.send_goal(gx, gy, timeout=240.0)
-            gt = ground_truth_pose()
+            gt = self.gt.wait_fresh()
             err = math.hypot(gx - gt[0], gy - gt[1]) if gt else float('nan')
 
             # 只统计真的进了通道的那些段
@@ -400,7 +441,7 @@ class Nav2Test(Node):
         self.initial_pub.publish(msg)
 
     def amcl_error(self):
-        gt = ground_truth_pose()
+        gt = self.gt.wait_fresh()
         if gt is None or self.amcl_pose is None:
             return None
         return (math.hypot(self.amcl_pose[0] - gt[0], self.amcl_pose[1] - gt[1]),
@@ -412,7 +453,7 @@ class Nav2Test(Node):
         print('测试2  AMCL 从错误初始位姿收敛')
         print('=' * 68)
         self.spin_for(3.0)
-        gt = ground_truth_pose()
+        gt = self.gt.wait_fresh()
         if gt is None:
             print('  取不到 Gazebo 真值')
             return False
@@ -480,6 +521,7 @@ def main():
             results['窄通道压测'] = node.test_stress()
     finally:
         node.cmd_pub.publish(Twist())
+        node.gt.stop()
         remove_blocker()
         node.destroy_node()
         rclpy.shutdown()
