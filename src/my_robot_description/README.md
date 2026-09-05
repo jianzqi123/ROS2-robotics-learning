@@ -463,8 +463,43 @@ cause**: loosening the check to 0.25 m / 15 s pushed the failure interval from
 The robot is not moving slowly; it is not moving. **Root cause unidentified.**
 The looser threshold is kept as defensive tuning, not as a fix.
 
-**The passage is traversable but not robust.** Six legs, chosen so that later
-ones approach the gap at an angle instead of head-on:
+**Two parameters, measured against each other.** The stress run was repeated
+under three configurations, each in a freshly verified environment (one
+`gz sim`, `/scan` at 10 Hz, robot at the origin — see the orphaned-simulator
+entry in Known Issues for why that check exists):
+
+| Configuration | Legs reached | Passages | Recoveries | Worst clearance |
+|---|---|---|---|---|
+| `inflation 0.40`, no reverse | 5 / 6 | 3 | 34 | 15.4 cm |
+| `inflation 0.30`, no reverse | 5 / 6 | 3 | 14 | 5.7 cm |
+| **`inflation 0.30` + reverse** | **6 / 6** | **5** | **5** | **2.0 cm** |
+
+The leg that failed under both of the first two — angled northbound, stuck at
+`(-3.99, -1.98)` — completes with 0.082 m error once reverse is allowed.
+
+That fix came from noticing where the robot stops. Two independent failures had
+both parked it at an *end* of `wall_inner_a`: `(-1.5, -0.88)` near the east tip
+at `x = −1.0`, and `(-3.99, -1.98)` at the west tip at `x = −4.0`. Rounding a
+wall end is where a differential drive most wants to back up a little before
+turning, and `min_vel_x: 0.0` — DWB's default — forbids reverse entirely. With
+no reverse the robot can only rotate in place, in-place rotation produces no
+translation, and `SimpleProgressChecker` then calls it a stall. The failure
+signature says exactly this: `Failed to make progress` repeatedly, never `No
+valid trajectories`, and the planner never failing.
+
+This robot can afford reverse because its LiDAR is 360° — the space behind it
+is observed. A robot with a forward-only sensor should not be configured this
+way.
+
+The cost is measured, not waved away: worst clearance falls from 15.4 cm to
+2.0 cm across the three configurations. Nothing collided, but 2 cm is under
+half a map cell, and most of that loss comes from the inflation change rather
+than from reverse. Recoveries went 34 → 14 → 5 over the same three runs.
+
+**The passage is traversable but not robust** *(historical — the run below is
+the `inflation 0.40`, no-reverse configuration, kept because the later
+comparisons are read against it)*. Six legs, chosen so that later ones approach
+the gap at an angle instead of head-on:
 
 | Leg | Result | Goal error | Clearance in the gap |
 |---|---|---|---|
@@ -852,19 +887,25 @@ intuitive fix; determinism was the useful one.
   below.
 - [x] ~~**The tight passage was traversed, not stressed.**~~ Stressed — five
   more passes, three of them angled. Worst clearance 15.4 cm.
-- [ ] **`inflation_radius: 0.30` is derived but unvalidated, and the run that
-  looked like evidence against it was contaminated.** The 0.40 defect is proven
-  — 419 trajectories rejected in the 0.90 m `platform` gap. The replacement had
-  one stress run that ended with the robot wedged and odometry 9 m out. That
-  run is now suspect: **seven orphaned `gz sim` servers were found running
+- [x] ~~**`inflation_radius: 0.30` is derived but unvalidated.**~~ Re-measured
+  in a verified-clean environment: it halves recoveries (34 → 14) and tightens
+  goal errors relative to 0.40, at the cost of clearance. The run that had
+  looked like evidence against it was contaminated — details below, kept
+  because the lesson is the point.
+- [ ] **A contaminated run was nearly taken as a result.** The 0.30 stress run
+  that ended with the robot wedged and odometry 9 m out happened while **seven
+  orphaned `gz sim` servers were running
   simultaneously**, the oldest for over an hour, because the cleanup pattern
   used `/gz sim` while the real process is `gz sim -s -r …` with no leading
   slash — killing only the shell wrapper and orphaning the child. The
   signatures were all there and were misread at the time: `/scan` publishing at
   20 Hz against a 10 Hz sensor, `/odom` holding a stale value, `gz model`
   returning nothing because the model name was ambiguous, `TF_OLD_DATA`
-  everywhere. Any result from that window has to be re-taken before it means
-  anything.
+  everywhere. Everything from that window was re-taken; the environment check
+  now run before every measurement (one `gz sim`, `/scan` at 10 Hz, robot at
+  the origin, ground truth answering) exists because of it. Left open as a
+  standing reminder: a measurement is only as trustworthy as the check that the
+  thing being measured is the only one running.
 - [ ] **Wheel slip destroys localization, and Nav2 reports success anyway.**
   In that run three position sources disagreed completely: ground truth
   `(3.00, 2.57)` — physically wedged under `table1` — against `/odom`
@@ -893,10 +934,15 @@ intuitive fix; determinism was the useful one.
   moved the failure interval and nothing else. **Next: log `/plan` and
   `/cmd_vel` while it is stuck**, which distinguishes "no command issued" from
   "command issued and the robot does not move".
-- [ ] **Angled approaches to the passage are unreliable.** Head-on passes land
-  within 0.14 m; angled ones overshoot to 0.230 m, or fail outright. 34
-  recovery invocations across six legs, against zero for the original
-  four-goal run. Probably the same underlying cause as the item above.
+- [x] ~~**Angled approaches to the passage are unreliable.**~~ Fixed by
+  allowing reverse (`min_vel_x: -0.10`). 6/6 legs, 5 passages, 5 recoveries.
+  Both stuck points had been at the ends of `wall_inner_a`, where a
+  differential drive needs to back up before turning.
+- [ ] **Clearance is down to 2.0 cm.** The configuration that passes does so by
+  cutting much closer: 15.4 cm → 5.7 cm → 2.0 cm across the three runs, most of
+  it from the inflation change. Under half a map cell. Nothing collided, but
+  the obvious experiment — `inflation 0.35` *with* reverse — has not been run,
+  and it might buy back margin without giving up completion.
 - [ ] **`SimpleGoalChecker` reports success outside its own tolerance.** One
   leg finished 0.230 m from goal with `xy_goal_tolerance: 0.15`. `stateful:
   true` latches on first entry and the robot coasts out — tolerable at 0.16 m,
