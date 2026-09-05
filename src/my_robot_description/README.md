@@ -362,6 +362,57 @@ and resting pitch measured **1.3367°** against 1.3367° predicted — read afte
 the robot had driven and stopped at ~10.5° of yaw, so it is a fresh test of a
 prediction made before Nav2 existed, not a re-reading of the same measurement.
 
+### Where navigation actually breaks
+
+The two tests above pass. The two below do not, and they are the more useful
+ones — the first four goals succeeded on the first attempt, which meant nothing
+downstream of "plan and follow" had ever run.
+
+**Recovery behaviours fire, but the detour does not complete.** The test waits
+until the robot has committed to the passage, then drops a 1.1 m blocker across
+it — sealing the only short route and leaving the long way around
+`wall_inner_a`'s east end. Recovery behaviours were invoked **15 times**
+(`number_of_recoveries` from the action feedback, so this is the BT's own
+count, not a guess from logs). The robot escaped the passage and drove ~3 m
+east, then stopped at `x ≈ −1.5` — about 0.5 m short of the wall's east tip —
+and the BT exhausted its recovery budget and aborted the goal. Reproduced
+three times, always ending within 0.1 m of the same spot.
+
+The logs say `Failed to make progress`, repeatedly, while the planner never
+once reports a failure. So paths exist and the controller cannot follow them.
+The obvious suspect was `SimpleProgressChecker`, whose 0.5 m / 10 s threshold
+cannot be met by a differential drive that has to rotate in place first — an
+in-place turn produces zero translation, and at `slowing_factor: 5.0` a 180°
+turn takes most of the 10 s window. That reasoning is sound but **it is not the
+cause**: loosening the check to 0.25 m / 15 s pushed the failure interval from
+~11 s to ~17 s, confirming the parameter took effect, and changed nothing else.
+The robot is not moving slowly; it is not moving. **Root cause unidentified.**
+The looser threshold is kept as defensive tuning, not as a fix.
+
+**The passage is traversable but not robust.** Six legs, chosen so that later
+ones approach the gap at an angle instead of head-on:
+
+| Leg | Result | Goal error | Clearance in the gap |
+|---|---|---|---|
+| head-on southbound | ok | 0.138 m | **18.0 cm** |
+| head-on northbound | ok | 0.050 m | **18.7 cm** |
+| angled southbound | ok | 0.230 m | **15.4 cm** |
+| angled northbound | **failed** | 3.102 m | — |
+| angled southbound (2) | ok | 0.125 m | did not use the gap |
+
+Clearance is measured, not assumed: ground truth is sampled inside the gap and
+the robot's 0.25 m circumscribed radius subtracted, giving the real gap between
+robot and wall. The worst pass left **15.4 cm**, comfortably above the 10 cm
+that `inflation_radius = 0.40` predicts — so that choice is validated with
+margin, which is the one clean result here.
+
+Everything else degrades with approach angle. Head-on passes land within
+0.14 m; the angled pass that succeeded overshot by 0.230 m, outside the 0.15 m
+tolerance it reported success on; one angled leg failed outright 3.1 m from its
+goal; and the run needed **34 recovery invocations** across six legs against
+zero for the original four-goal sequence. Whatever stops the robot in the
+blocked-passage test is likely the same thing degrading it here.
+
 That 0.39 % is the same wheel-odometry chain the
 [odometry accuracy](#odometry-accuracy) section measured at 1.08 % over a
 harder sequence, and the 1.3367° is the number
@@ -722,10 +773,25 @@ intuitive fix; determinism was the useful one.
 - [x] ~~**AMCL is never actually challenged.**~~ Fixed by the same script:
   injecting a 0.958 m / 25.4° pose error and rotating in place recovers to
   0.029 m / 0.3°. See [Navigation](#navigation).
-- [ ] **Recovery behaviours are still untested.** All four goals succeeded on
-  the first attempt, so `spin`, `backup` and `wait` never fired. Testing them
-  needs a deliberately blocked path — an obstacle dropped into the costmap
-  after planning, or a goal inside the west wall's occlusion gap.
-- [ ] **The tight passage was traversed, not stressed.** One pass at
-  0.22 m/s succeeded. Whether it survives repeated passes, or passes taken at
-  an angle rather than head-on, is not known.
+- [x] ~~**Recovery behaviours are still untested.**~~ Tested — they fire 15
+  times when the passage is sealed mid-drive. What that test *found* is open,
+  below.
+- [x] ~~**The tight passage was traversed, not stressed.**~~ Stressed — five
+  more passes, three of them angled. Worst clearance 15.4 cm.
+- [ ] **The robot cannot complete a detour after its route is blocked.** It
+  escapes the passage, drives ~3 m east, then stops ~0.5 m short of
+  `wall_inner_a`'s east tip and the goal is aborted. Reproduced three times to
+  within 0.1 m. `Failed to make progress` repeats while the planner never
+  fails, so paths exist and the controller will not follow them.
+  `SimpleProgressChecker` was ruled out by test, not by argument — loosening it
+  moved the failure interval and nothing else. **Next: log `/plan` and
+  `/cmd_vel` while it is stuck**, which distinguishes "no command issued" from
+  "command issued and the robot does not move".
+- [ ] **Angled approaches to the passage are unreliable.** Head-on passes land
+  within 0.14 m; angled ones overshoot to 0.230 m, or fail outright. 34
+  recovery invocations across six legs, against zero for the original
+  four-goal run. Probably the same underlying cause as the item above.
+- [ ] **`SimpleGoalChecker` reports success outside its own tolerance.** One
+  leg finished 0.230 m from goal with `xy_goal_tolerance: 0.15`. `stateful:
+  true` latches on first entry and the robot coasts out — tolerable at 0.16 m,
+  much less so at 0.23 m. Worth re-checking against `stateful: false`.

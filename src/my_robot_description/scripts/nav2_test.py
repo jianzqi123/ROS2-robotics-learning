@@ -11,7 +11,26 @@ Nav2 自动化验证 —— 把 README 里两条"没测过"变成测过的。
     # 终端3
     python3 ~/ros2_ws/src/my_robot_description/scripts/nav2_test.py
 
-    只跑其中一项:  --only passage    /  --only amcl
+    只跑其中一项:  --only passage / amcl / recovery / stress
+
+反复跑之前务必确认上一轮的进程真的死透了。同名节点并存时
+`ros2 lifecycle get` 会随机应答其中一个, 症状是"参数明明改了却不生效"、
+"日志显示 activate 成功但状态查出来是 unconfigured"。
+另外别用 `pkill -f "gz sim"` 这类模式清理 —— 它会匹配到你自己那条
+包含该字样的 shell 命令, 把执行清理的 shell 一起杀掉,
+于是清理只做了一半而你以为做完了。按 PID 杀。
+
+测试3 动态障碍触发恢复行为
+    此前四个目标全部一次成功, 所以 spin/backup/wait 从未被调用过。
+    本测试等车开进通道口再往通道里塞一个封死缺口的静态障碍 ——
+    提前塞会让全局规划器从容绕东端, 那是"重规划"不是"恢复"。
+    恢复次数取自动作反馈的 number_of_recoveries, 是 BT 真的调用过
+    恢复行为的直接证据, 不靠翻日志猜。
+
+测试4 窄通道压测
+    此前通道只被正对着走通过一次。本测试连续穿越多次, 后几段起点偏东
+    使车斜切进入, 并逐段量出车心到通道两壁的最小余量再减去外接半径 ——
+    这才是"离墙多近"的真实答案, 而不是"到了没到"。
 
 测试1 多目标穿越窄通道
     此前 Nav2 只被送过一个目标点, 落在空地上, 既没考验规划器绕障,
@@ -61,6 +80,30 @@ GOALS = [
 PASSAGE_X = (-5.0, -4.0)
 PASSAGE_Y = (-1.9, -1.1)
 
+ROBOT_RADIUS = 0.25       # 与 nav2_params.yaml 一致
+INFLATION = 0.40          # 同上
+
+PASSAGE_NORTH = (-4.5, 0.0)
+PASSAGE_SOUTH = (-4.5, -3.0)
+
+# 封路障碍: 横跨整个 1.0m 缺口(宽 1.1m 略有富余), 放在通道正中 y=-1.5。
+# 目的是让通道彻底不可通行, 逼 Nav2 要么走恢复行为, 要么绕内墙东端。
+BLOCKER_POSE = (-4.5, -1.5)
+BLOCKER_SIZE = (1.1, 0.3, 1.0)
+
+# 压测航点。挑选依据: 相邻两点分别位于 wall_inner_a 两侧,
+# 所以每一段都必须穿通道; 后几段起点偏东, 使车斜着切入而不是正对着进。
+# 已核对全部航点都在自由空间: platform 占 x[-4.1,-2.9] y[0.4,1.6],
+# box2 占 x[-2.5,-1.5] y[1.5,2.5], 均不与航点重叠。
+STRESS_WAYPOINTS = [
+    ('通道以北', -4.5, 0.0),
+    ('正对穿越-南', -4.5, -3.0),
+    ('正对穿越-北', -4.5, 0.5),
+    ('斜切穿越-南', -3.0, -3.0),
+    ('斜切穿越-北', -2.5, 0.5),
+    ('斜切穿越-南2', -4.5, -3.0),
+]
+
 # 测试2 故意给的偏移量: 0.8m + 25 度。
 # 选这个量级的理由: 明显大于 AMCL 的 update_min_d(0.25m), 足以说明
 # "它真的被放错了"; 又小于 laser_likelihood_max_dist(2.0m), 使得
@@ -84,6 +127,43 @@ def ground_truth_pose(model='my_robot'):
 
 def wrap_pi(a):
     return math.atan2(math.sin(a), math.cos(a))
+
+
+def _gz(args, timeout=20):
+    try:
+        return subprocess.run(args, capture_output=True, text=True,
+                              timeout=timeout).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ''
+
+
+def spawn_blocker(x, y, name='blocker'):
+    """往运行中的世界里塞一个静态障碍, 用来在导航途中封路。"""
+    sx, sy, sz = BLOCKER_SIZE
+    sdf = (
+        '<?xml version="1.0"?><sdf version="1.8">'
+        f'<model name="{name}"><static>true</static><link name="l">'
+        f'<collision name="c"><geometry><box><size>{sx} {sy} {sz}</size>'
+        '</box></geometry></collision>'
+        f'<visual name="v"><geometry><box><size>{sx} {sy} {sz}</size>'
+        '</box></geometry></visual></link></model></sdf>'
+    )
+    out = _gz([
+        'gz', 'service', '-s', '/world/my_world/create',
+        '--reqtype', 'gz.msgs.EntityFactory', '--reptype', 'gz.msgs.Boolean',
+        '--timeout', '5000',
+        '--req', f"sdf: '{sdf}', pose: {{position: {{x: {x}, y: {y}, "
+                 f"z: {sz / 2}}}}}",
+    ])
+    return 'true' in out
+
+
+def remove_blocker(name='blocker'):
+    _gz([
+        'gz', 'service', '-s', '/world/my_world/remove',
+        '--reqtype', 'gz.msgs.Entity', '--reptype', 'gz.msgs.Boolean',
+        '--timeout', '5000', '--req', f'name: "{name}", type: MODEL',
+    ])
 
 
 class Nav2Test(Node):
@@ -119,19 +199,32 @@ class Nav2Test(Node):
 
     # ------------------------------------------------ 测试1 多目标 + 窄通道
 
-    def send_goal(self, x, y, timeout=180.0):
-        """发一个目标点, 阻塞到结束。返回 (成功?, 轨迹采样列表)。"""
+    def send_goal(self, x, y, timeout=180.0, on_sample=None):
+        """
+        发一个目标点, 阻塞到结束。返回 (成功?, 轨迹采样, 恢复次数)。
+
+        on_sample(gt) 每采到一个真值就回调一次, 用来在导航途中做事情
+        (比如等机器人开到某处再扔障碍物)。
+        恢复次数取自动作反馈的 number_of_recoveries —— 这是 BT 是否真的
+        调用过 spin/backup/wait 的直接证据, 比翻日志靠谱。
+        """
         goal = NavigateToPose.Goal()
         goal.pose.header.frame_id = 'map'
         goal.pose.pose.position.x = float(x)
         goal.pose.pose.position.y = float(y)
         goal.pose.pose.orientation.w = 1.0
 
-        send = self.nav.send_goal_async(goal)
+        self._recoveries = 0
+
+        def _fb(msg):
+            self._recoveries = max(self._recoveries,
+                                   int(msg.feedback.number_of_recoveries))
+
+        send = self.nav.send_goal_async(goal, feedback_callback=_fb)
         rclpy.spin_until_future_complete(self, send, timeout_sec=20.0)
         handle = send.result()
         if handle is None or not handle.accepted:
-            return False, []
+            return False, [], 0
 
         result_future = handle.get_result_async()
         track, deadline = [], time.time() + timeout
@@ -140,11 +233,15 @@ class Nav2Test(Node):
             gt = ground_truth_pose()
             if gt:
                 track.append(gt)
+                if on_sample:
+                    on_sample(gt)
             if result_future.done():
                 break
         if not result_future.done():
-            return False, track
-        return result_future.result().status == 4, track   # 4 = SUCCEEDED
+            handle.cancel_goal_async()
+            return False, track, self._recoveries
+        ok = result_future.result().status == 4      # 4 = SUCCEEDED
+        return ok, track, self._recoveries
 
     def test_passage(self):
         print('=' * 68)
@@ -157,7 +254,7 @@ class Nav2Test(Node):
         rows, went_through = [], False
         for label, gx, gy in GOALS:
             print(f'  -> {label} ({gx}, {gy}) ...', flush=True)
-            ok, track = self.send_goal(gx, gy)
+            ok, track, _ = self.send_goal(gx, gy)
             gt = ground_truth_pose()
             if gt is None:
                 print('     取不到 Gazebo 真值')
@@ -182,6 +279,109 @@ class Nav2Test(Node):
         print(f'  全部到达: {"是" if all_ok else "否"}')
         print(f'  穿越窄通道: {"是" if went_through else "否 —— 规划器绕了远路"}')
         return all_ok and went_through
+
+    # -------------------------------------------- 测试3 恢复行为 / 动态障碍
+
+    def test_recovery(self):
+        print()
+        print('=' * 68)
+        print('测试3  动态障碍触发恢复行为')
+        print('=' * 68)
+        if not self.nav.wait_for_server(timeout_sec=20.0):
+            print('  navigate_to_pose 没起来')
+            return False
+
+        remove_blocker()
+        print('  先回到通道以北 ...', flush=True)
+        self.send_goal(*PASSAGE_NORTH)
+
+        # 目标在通道以南。等车真的开进通道口再封路 ——
+        # 提前封会让全局规划器不慌不忙地绕东边走, 那是"重规划"不是"恢复"。
+        state = {'dropped': False}
+
+        def watch(gt):
+            if state['dropped']:
+                return
+            if gt[0] < -4.0 and gt[1] < -0.6:
+                if spawn_blocker(*BLOCKER_POSE):
+                    state['dropped'] = True
+                    print(f'     [车到 ({gt[0]:+.2f},{gt[1]:+.2f}), 封死通道]',
+                          flush=True)
+
+        # 超时给到 420s: 封路后唯一出路是绕内墙东端, 路程约 9.3m,
+        # 0.22m/s 下净行驶就要 42s, 而恢复行为每次要花掉 5~15s。
+        # 240s 试过, 车推进到 x=-1.45(离东端只差 0.45m)才超时 ——
+        # 那是预算不够, 不是走不通, 两者结论天差地别。
+        print(f'  -> 通道以南 {PASSAGE_SOUTH} , 途中封路 ...', flush=True)
+        ok, track, recoveries = self.send_goal(*PASSAGE_SOUTH, timeout=420.0,
+                                               on_sample=watch)
+        gt = ground_truth_pose()
+        remove_blocker()
+
+        if not state['dropped']:
+            print('  障碍物始终没投放 —— 车没走到通道口, 本测试无效')
+            return False
+
+        detoured = any(p[0] > -1.0 for p in track)   # 绕到内墙东端以外
+        print()
+        print(f'  恢复行为触发次数  {recoveries}')
+        print(f'  最终到达          {"是" if ok else "否"}'
+              f'  真值({gt[0]:+.3f}, {gt[1]:+.3f})' if gt else '')
+        print(f'  是否绕行东端      {"是" if detoured else "否"}')
+        print()
+        # 判据: 通道被封死后, 唯一的合格结局是"察觉到走不通并另找出路"。
+        # 恢复行为触发, 或者绕东端成功抵达, 都算; 两者都没有说明它在硬撞。
+        ok_overall = (recoveries > 0) or (ok and detoured)
+        print(f'  判定: {"通过" if ok_overall else "未通过"}'
+              f'  (需要 恢复次数>0 或 绕行东端抵达)')
+        return ok_overall
+
+    # ------------------------------------------------ 测试4 窄通道压测
+
+    def test_stress(self):
+        print()
+        print('=' * 68)
+        print('测试4  窄通道反复穿越 + 斜切进入')
+        print('=' * 68)
+        if not self.nav.wait_for_server(timeout_sec=20.0):
+            print('  navigate_to_pose 没起来')
+            return False
+        remove_blocker()
+
+        rows = []
+        for i, (label, gx, gy) in enumerate(STRESS_WAYPOINTS):
+            ok, track, rec = self.send_goal(gx, gy, timeout=240.0)
+            gt = ground_truth_pose()
+            err = math.hypot(gx - gt[0], gy - gt[1]) if gt else float('nan')
+
+            # 只统计真的进了通道的那些段
+            inside = [p for p in track
+                      if PASSAGE_X[0] <= p[0] <= PASSAGE_X[1]
+                      and PASSAGE_Y[0] <= p[1] <= PASSAGE_Y[1]]
+            # 通道西侧是西墙内表面 x=-5.0, 东侧是 wall_inner_a 的端头 x=-4.0。
+            # 车心到两侧的最小距离再减去外接半径, 就是真实余量。
+            clear = (min(min(p[0] - PASSAGE_X[0], PASSAGE_X[1] - p[0])
+                         for p in inside) - ROBOT_RADIUS) if inside else None
+            rows.append((label, ok, err, bool(inside), clear, rec))
+            c = f'{clear * 100:5.1f} cm' if clear is not None else '   —  '
+            print(f'  {i + 1}. {label:<16}{"成功" if ok else "失败"}  '
+                  f'误差 {err:.3f} m  {"穿越" if inside else "未穿越"}  余量 {c}')
+
+        passes = [r for r in rows if r[3]]
+        ok_all = all(r[1] for r in rows)
+        print()
+        print(f'  穿越次数    {len(passes)}')
+        print(f'  全部到达    {"是" if ok_all else "否"}')
+        if passes:
+            worst = min(r[4] for r in passes)
+            print(f'  最小余量    {worst * 100:.1f} cm'
+                  f'   (膨胀层留出的理论余量 {(0.5 - INFLATION) * 100:.0f} cm)')
+            print(f'  恢复行为    共 {sum(r[5] for r in rows)} 次')
+        # 判据: 每段都要到达, 且至少穿越 4 次(含斜切), 且始终没有真正贴墙。
+        ok_overall = ok_all and len(passes) >= 4 and min(
+            r[4] for r in passes) > 0.0 if passes else False
+        print(f'  判定: {"通过" if ok_overall else "未通过"}')
+        return ok_overall
 
     # ------------------------------------------------------- 测试2 AMCL
 
@@ -262,7 +462,8 @@ class Nav2Test(Node):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--only', choices=['passage', 'amcl'])
+    ap.add_argument('--only',
+                    choices=['passage', 'amcl', 'recovery', 'stress'])
     args = ap.parse_args()
 
     rclpy.init()
@@ -273,8 +474,13 @@ def main():
             results['多目标 + 窄通道'] = node.test_passage()
         if args.only in (None, 'amcl'):
             results['AMCL 收敛'] = node.test_amcl()
+        if args.only in (None, 'recovery'):
+            results['动态障碍 / 恢复'] = node.test_recovery()
+        if args.only in (None, 'stress'):
+            results['窄通道压测'] = node.test_stress()
     finally:
         node.cmd_pub.publish(Twist())
+        remove_blocker()
         node.destroy_node()
         rclpy.shutdown()
 
