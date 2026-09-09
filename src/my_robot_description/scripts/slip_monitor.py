@@ -10,6 +10,18 @@
     python3 ~/ros2_ws/src/my_robot_description/scripts/slip_monitor.py
     # 终端2  自检: 自己开向 box1 撞上去, 看检测器是否在该响的时候响
     python3 ~/ros2_ws/src/my_robot_description/scripts/slip_monitor.py --verify
+    # 终端2  监视 + 检出即中止导航并恢复(需要 nav2 在跑)
+    python3 ~/ros2_ws/src/my_robot_description/scripts/slip_monitor.py --abort
+    # 终端2  验证上面那条链路
+    python3 ~/ros2_ws/src/my_robot_description/scripts/slip_monitor.py --verify-abort
+
+检出之后做三件事(--abort):
+    1. 取消 Nav2 目标 —— 继续走只会把 AMCL 一起带偏
+    2. 在 /slip_detected 上发 true —— 中止只是停车, 这条消息才是
+       "定位现在不可信"那个信息本身
+    3. 以打滑开始之前的位姿重新播种 AMCL, 然后倒车 0.3m
+       (倒车既脱困, 又提供 AMCL 更新所需的位移: update_min_d 是 0.25m,
+        车不动 AMCL 根本不更新, 所以"只播种不动"完全没有效果)
 
 为什么不能比较"指令速度"和"/joint_states 关节速度":
     gz-sim-diff-drive-system 是速度控制器, 轮子不管有没有抓地都会转到
@@ -49,13 +61,15 @@ import time
 import rclpy
 from rclpy.action import ActionClient
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import (QoSDurabilityPolicy, QoSHistoryPolicy, QoSProfile,
+                       QoSReliabilityPolicy, qos_profile_sensor_data)
 
 from action_msgs.srv import CancelGoal
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
 from nav2_msgs.action import NavigateToPose
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan
+from std_msgs.msg import Bool
 
 # 判据常数, 全部有出处(见模块 docstring)
 WINDOW_S = 1.0          # 比较当前扫描与多久之前的扫描
@@ -75,6 +89,29 @@ CONTACT_TOL = 0.15
 # 取消后车会停下, odom 不再前进, 检测器自然不再触发, 所以冷却主要是
 # 防止取消请求在动作真正终止前被连发。
 ABORT_COOLDOWN_S = 5.0
+
+# 中止后的恢复动作。
+# 为什么必须包含运动: AMCL 的 update_min_d 是 0.25m —— 车不动它根本不更新,
+# 所以"只把位姿重新播种一下"在停着的车上完全没有效果。倒车既能脱困,
+# 又给了 AMCL 重新收敛所需的位移。倒车在这台车上安全, 因为雷达是 360 度的。
+BACKUP_DIST = 0.30       # m, 略大于 update_min_d, 保证 AMCL 至少更新一次
+BACKUP_SPEED = 0.10      # m/s, 与 DWB 时期的倒车限幅一致
+BACKUP_TIMEOUT_S = 8.0
+
+# 用打滑开始之前的那个 AMCL 位姿去播种, 不能用当前的。
+# 这一点是实测撞出来的: 第一版拿当前估计播种, 结果播种后 AMCL 与真值
+# 差 0.574m —— 打滑期间 odom 虚进了 0.22m, AMCL 的运动模型跟着漂,
+# 拿这个已经错了的估计重新声明一遍, 错误原样保留, 放大方差也救不回来。
+# 正确的依据藏在打滑的定义里: 打滑期间车没有移动, 所以打滑开始之前的
+# 位姿就是当前的真实位姿 —— 这不是近似, 是精确的。
+# 回溯多久: 确认需要 CONFIRM_N=3 次连续判定(每 0.5s 一次) 加上 1s 的
+# 比较窗口, 所以打滑大约始于确认前 2.5s, 取 3.0s 留余量。
+PRESLIP_LOOKBACK_S = 3.0
+
+# 重新播种时给的不确定度。
+# 播种不是"我知道我在哪", 而是"我大概在这附近, 请重新收敛"。
+RESEED_XY_VAR = 0.25     # = 0.5m 标准差
+RESEED_YAW_VAR = 0.07    # ≈ 15 度标准差
 
 # --verify-abort 用的隐形障碍物。
 #   高 0.12m: 光束高度 h(r) = 0.1822 - r*tan(0.337 度) = 0.1822 - 0.00588r,
@@ -112,6 +149,10 @@ class SlipMonitor(Node):
         self.last_eval = 0.0
         self.aborts = 0
         self.last_abort = 0.0
+        self.amcl_pose = None            # (x, y, z, w) 位置 + 四元数 z/w
+        self.amcl_hist = []              # [(t, pose)], 用于回溯到打滑之前
+        self.recovery = None             # None | ('backup', 起点 odom, 起始时刻)
+        self.reseeds = 0
 
         self.create_subscription(Odometry, '/odom', self._on_odom, 20)
         self.create_subscription(LaserScan, '/scan', self._on_scan,
@@ -122,6 +163,80 @@ class SlipMonitor(Node):
         self.cancel_cli = self.create_client(
             CancelGoal, '/navigate_to_pose/_action/cancel_goal')
         self.nav = ActionClient(self, NavigateToPose, 'navigate_to_pose')
+
+        # AMCL 的 /amcl_pose 是 transient_local, 订阅端 QoS 必须匹配
+        amcl_qos = QoSProfile(
+            depth=1, history=QoSHistoryPolicy.KEEP_LAST,
+            reliability=QoSReliabilityPolicy.RELIABLE,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
+        self.create_subscription(PoseWithCovarianceStamped, '/amcl_pose',
+                                 self._on_amcl, amcl_qos)
+        self.initial_pub = self.create_publisher(
+            PoseWithCovarianceStamped, '/initialpose', 10)
+        # 让下游知道"定位现在不可信"。中止只是停车, 这个话题才是那条信息。
+        self.status_pub = self.create_publisher(Bool, '/slip_detected', 10)
+        # 恢复动作用定时器驱动, 不能写在订阅回调里 —— 在回调里跑阻塞的
+        # 行驶循环会把执行器卡住, 连 /scan 都收不到, 检测器自己就瞎了。
+        self.create_timer(0.05, self._recovery_tick)
+
+    def _on_amcl(self, msg):
+        p = msg.pose.pose
+        self.amcl_pose = (p.position.x, p.position.y,
+                          p.orientation.z, p.orientation.w)
+        now = time.time()
+        self.amcl_hist.append((now, self.amcl_pose))
+        self.amcl_hist = [h for h in self.amcl_hist if now - h[0] <= 15.0]
+
+    def _preslip_pose(self):
+        """取打滑开始之前的 AMCL 位姿; 没有足够历史时退回当前值。"""
+        if not self.amcl_hist:
+            return None, False
+        cutoff = time.time() - PRESLIP_LOOKBACK_S
+        old = [h for h in self.amcl_hist if h[0] <= cutoff]
+        if old:
+            return old[-1][1], True
+        return self.amcl_hist[0][1], False
+
+    def _recovery_tick(self):
+        """中止后的恢复: 先倒车脱困并给 AMCL 位移, 再放大不确定度重新播种。"""
+        if self.recovery is None or self.odom is None:
+            return
+        kind, o0, t0 = self.recovery
+        if kind != 'backup':
+            return
+        moved = math.hypot(self.odom[1] - o0[1], self.odom[2] - o0[2])
+        timeout = time.time() - t0 > BACKUP_TIMEOUT_S
+        if moved < BACKUP_DIST and not timeout:
+            tw = Twist()
+            tw.linear.x = -BACKUP_SPEED
+            self.cmd_pub.publish(tw)
+            return
+        self.cmd_pub.publish(Twist())
+        self.recovery = None
+        note = ' (超时)' if timeout else ''
+        print(f'  [恢复] 已倒车 {moved:.2f} m{note}', flush=True)
+
+    def _reseed_amcl(self):
+        pose, fresh = self._preslip_pose()
+        if pose is None:
+            print('  [恢复] 收不到 /amcl_pose, 跳过重新播种', flush=True)
+            return
+        x, y, qz, qw = pose
+        m = PoseWithCovarianceStamped()
+        m.header.frame_id = 'map'
+        m.header.stamp = self.get_clock().now().to_msg()
+        m.pose.pose.position.x = x
+        m.pose.pose.position.y = y
+        m.pose.pose.orientation.z = qz
+        m.pose.pose.orientation.w = qw
+        m.pose.covariance[0] = RESEED_XY_VAR
+        m.pose.covariance[7] = RESEED_XY_VAR
+        m.pose.covariance[35] = RESEED_YAW_VAR
+        self.initial_pub.publish(m)
+        self.reseeds += 1
+        src = f'{PRESLIP_LOOKBACK_S:.0f}s 前' if fresh else '历史最早(可能不够旧)'
+        print(f'  [恢复] 以 σ=0.5m 在 ({x:+.2f}, {y:+.2f}) 重新播种 AMCL '
+              f'—— 取自{src}的位姿, 因为打滑期间车并没有移动', flush=True)
 
     def _abort_nav(self):
         """确认打滑后中止导航。失败不抛异常 —— 监视器不该反过来搞垮系统。"""
@@ -137,6 +252,14 @@ class SlipMonitor(Node):
         self.aborts += 1
         print('  [中止] 已请求取消 Nav2 目标 —— 里程计已不可信, '
               '继续走只会把 AMCL 一起带偏', flush=True)
+        # 中止只是停车。这条消息才是"定位现在不可信"那个信息本身,
+        # 下游(上层调度、日志、人)据此决定要不要信任当前位姿。
+        self.status_pub.publish(Bool(data=True))
+        # 先播种再倒车: AMCL 会把倒车位移从修正后的位姿开始积分。
+        # 反过来做的话, 倒车这一段就是从错误位姿出发算的。
+        self._reseed_amcl()
+        if self.recovery is None and self.odom is not None:
+            self.recovery = ('backup', self.odom, time.time())
 
     def _on_odom(self, msg):
         t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
@@ -239,6 +362,19 @@ def verify(node):
     print('=' * 66)
     gt0 = ground_truth()
     print(f'  起点真值 {gt0}')
+
+    # 前提检查。本测试的接触点 x=2.30 是按"从原点朝 +x 直行撞 box1"推的,
+    # 换个起点或朝向, 车会撞上别的东西, 判据就失去意义 ——
+    # 曾经紧接着另一个测试跑, 车朝北停着, 结果一路撞上北墙,
+    # 检出完全正常却报"未通过", 是个误导性的失败。
+    # 前提不满足就明说, 不要产出一个看起来像结论的东西。
+    if gt0 is None:
+        print('  取不到真值, 无法确认前提')
+        return False
+    if abs(gt0[0]) > 0.3 or abs(gt0[1]) > 0.3:
+        print(f'  前提不满足: 本测试要求车在原点附近, 实际在 {gt0}。')
+        print('  请重启仿真后再跑 (bash scripts/kill_stack.sh 然后重新 launch)。')
+        return False
 
     print('  --- 阶段1: 自由行驶 6 s (预期: 无报警) ---')
     node.drive(0.2, 6.0)
@@ -361,9 +497,23 @@ def verify_abort(node):
         rclpy.spin_once(node, timeout_sec=0.1)
 
     status = fut.result().status if fut.done() else None
+    gt_stuck = ground_truth()
+
+    # 让恢复动作跑完(倒车 + 重新播种)。恢复由定时器驱动, 所以这里
+    # 只需要继续 spin。障碍物先不撤 —— 撤了就不是真实场景了。
+    print('  等待恢复动作(倒车 + 重新播种) ...', flush=True)
+    end = time.time() + 20.0
+    while rclpy.ok() and time.time() < end:
+        rclpy.spin_once(node, timeout_sec=0.1)
+        if node.reseeds > 0 and node.recovery is None:
+            break
+    node.cmd_pub.publish(Twist())
+    # 给 AMCL 一点时间消化重新播种
+    settle = time.time() + 3.0
+    while rclpy.ok() and time.time() < settle:
+        rclpy.spin_once(node, timeout_sec=0.1)
     gt1 = ground_truth()
     remove_low_obstacle()
-    node.cmd_pub.publish(Twist())
 
     # 动作状态: 4=SUCCEEDED 5=CANCELED 6=ABORTED
     name = {4: 'SUCCEEDED', 5: 'CANCELED', 6: 'ABORTED'}.get(status, str(status))
@@ -383,14 +533,32 @@ def verify_abort(node):
         dy = None
         print('  取不到真值, 接触点无法确认')
 
+    # 恢复效果: 车是否退离接触点, 以及重新播种后 AMCL 是否仍与真值一致
+    backed = None
+    if gt_stuck and gt1:
+        backed = math.hypot(gt1[0] - gt_stuck[0], gt1[1] - gt_stuck[1])
+        print(f'  卡住位置 ({gt_stuck[0]:+.3f}, {gt_stuck[1]:+.3f}) '
+              f'-> 恢复后 ({gt1[0]:+.3f}, {gt1[1]:+.3f}), 退开 {backed:.2f} m')
+    amcl_err = None
+    if node.amcl_pose and gt1:
+        amcl_err = math.hypot(node.amcl_pose[0] - gt1[0],
+                              node.amcl_pose[1] - gt1[1])
+        print(f'  重新播种后 AMCL 与真值差 {amcl_err:.3f} m')
+    print(f'  重新播种次数  {node.reseeds}')
+
     detected = len(node.events) > 0
     aborted = node.aborts > 0 and status in (5, 6)
     stopped = dy is not None and dy < 0.35
+    recovered = (node.reseeds > 0 and backed is not None
+                 and backed > BACKUP_DIST * 0.6)
+    localized = amcl_err is not None and amcl_err < 0.30
     print()
-    print(f'  检出打滑:     {"是" if detected else "否 —— 漏报"}')
-    print(f'  目标被中止:   {"是" if aborted else "否"}')
-    print(f'  停在矮块处:   {"是" if stopped else ("否" if dy is not None else "无法确认")}')
-    ok = detected and aborted and stopped
+    print(f'  检出打滑:       {"是" if detected else "否 —— 漏报"}')
+    print(f'  目标被中止:     {"是" if aborted else "否"}')
+    print(f'  停在矮块处:     {"是" if stopped else ("否" if dy is not None else "无法确认")}')
+    print(f'  倒车并重播种:   {"是" if recovered else "否"}')
+    print(f'  播种后定位可信: {"是" if localized else ("否" if amcl_err is not None else "无法确认")}')
+    ok = detected and aborted and stopped and recovered and localized
     print(f'  判定: {"通过" if ok else "未通过"}')
     return ok
 

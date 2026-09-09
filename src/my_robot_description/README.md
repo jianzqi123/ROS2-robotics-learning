@@ -428,6 +428,38 @@ The number worth keeping is the odometry error at the moment of abort:
 noticed, and AMCL followed it. Catching it two orders of magnitude earlier is
 the whole value.
 
+**Stopping is not enough — the pose is still wrong.** So the abort also
+publishes `true` on `/slip_detected` (stopping is an action; that topic is the
+*information*), reseeds AMCL, and backs the robot 0.30 m out of whatever it hit.
+
+Two details in that sequence were found by getting them wrong first.
+
+*Recovery must include motion.* AMCL's `update_min_d` is 0.25 m, so a
+stationary robot never runs a filter update at all — reseeding a stopped robot
+does nothing. The 0.30 m reversal exists to clear the obstacle *and* to give
+AMCL the displacement it needs to re-converge. Reverse is safe here because the
+LiDAR is 360°.
+
+*Reseed at the pre-slip pose, not the current one.* The first version seeded at
+AMCL's current estimate, and localization stayed broken — 0.574 m from ground
+truth. Of course it did: during the slip, odometry advanced ~0.22 m while the
+robot sat still and AMCL's motion model followed it, so seeding there just
+restates the wrong answer with a wider variance. The correct seed follows from
+what slip *is* — **the robot did not move, so the pose from before the slip is
+the current true pose.** That is exact, not an approximation. Seeding from 3 s
+back (long enough to precede the 3-sample confirmation plus the 1 s window) and
+doing it *before* the reversal, so AMCL integrates the reversal from a corrected
+pose, gives **0.092 m**.
+
+| | seeded at current estimate | seeded at pre-slip pose |
+|---|---|---|
+| AMCL vs ground truth after recovery | 0.574 m | **0.092 m** |
+
+Verified end to end: slip detected, goal `CANCELED`, robot stopped at the
+contact point, backed 0.30 m clear, AMCL within 0.092 m. The base detector was
+re-run afterwards as a regression check and still lands the contact point to
+1.1 mm.
+
 Scope, stated rather than implied: this detects *translational* slip only.
 Under pure rotation the scan change depends on the environment's angular
 structure, with no clean analytic expectation, so the monitor abstains when the
@@ -996,10 +1028,17 @@ intuitive fix; determinism was the useful one.
   the origin, ground truth answering) exists because of it. Left open as a
   standing reminder: a measurement is only as trustworthy as the check that the
   thing being measured is the only one running.
-- [ ] **After an abort, nothing tells the system its localization is suspect.**
-  ~~Wheel slip destroys localization, and Nav2 reports success anyway.~~ The
-  detection and the abort are done — the part below records why they were
-  needed, and what still is not handled.
+- [x] ~~**After an abort, nothing tells the system its localization is
+  suspect.**~~ The abort now publishes `/slip_detected`, reseeds AMCL from the
+  pre-slip pose, and backs the robot clear — 0.092 m from ground truth
+  afterwards, against 0.574 m when seeded from the drifted estimate. See
+  [Slip detection](#slip-detection).
+- [ ] **The pre-slip lookback is a fixed 3 s, which discards real motion.**
+  Seeding from 3 s back assumes the robot was already stuck then; in the
+  verification it had actually driven 0.24 m in that window, so that much
+  genuine displacement is thrown away. Scan matching absorbed it — 0.092 m
+  final error — but the right seed is the pose at the moment the detector's
+  streak *began*, which the monitor already knows and does not yet record.
 
   In the original failure three position sources disagreed completely: ground truth
   `(3.00, 2.57)` — physically wedged under `table1` — against `/odom`
