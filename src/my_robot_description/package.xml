@@ -11,10 +11,12 @@
   <maintainer email="jianzqi123@gmail.com">qiking</maintainer>
   <license>Apache-2.0</license>
 
-  <!-- teleport_test.py 直接 import 的库 -->
+  <!-- scripts/ 下的诊断脚本直接 import 的库 -->
   <depend>rclpy</depend>
   <depend>geometry_msgs</depend>
   <depend>nav_msgs</depend>
+  <depend>nav2_msgs</depend>
+  <depend>dwb_msgs</depend>
 
   <!-- 仅在 launch 时被拉起的节点,不参与编译,故为 exec_depend -->
   <exec_depend>robot_state_publisher</exec_depend>

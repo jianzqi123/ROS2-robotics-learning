@@ -103,7 +103,9 @@ my_robot_description/
 │   ├── teleport_test.py         # automated physics-stability diagnostic
 │   ├── map_slice_check.py       # occupancy measurement + passage clearance
 │   ├── nav2_test.py             # unattended navigation + AMCL convergence test
-│   └── slip_monitor.py          # wheel-slip detection from /scan
+│   ├── slip_monitor.py          # wheel-slip detection from /scan
+│   ├── dwb_critic_probe.py      # reads /evaluation: which critic vetoes speed
+│   └── kill_stack.sh            # stop sim + nav2, verified to zero
 ├── demo_map.gif                 # SLAM mapping run (Demo section above)
 ├── demo_lidar.gif               # earlier build: raw 16-beam point cloud
 ├── package.xml                  # dependencies — keep in sync with the launch files
@@ -925,15 +927,41 @@ intuitive fix; determinism was the useful one.
   numbers agree perfectly. It is the same fact this file already records from
   the SLAM work — odometry being self-consistent proves nothing — approached
   from the other side.
-- [ ] **The robot cannot complete a detour after its route is blocked.** It
-  escapes the passage, drives ~3 m east, then stops ~0.5 m short of
-  `wall_inner_a`'s east tip and the goal is aborted. Reproduced three times to
-  within 0.1 m. `Failed to make progress` repeats while the planner never
-  fails, so paths exist and the controller will not follow them.
-  `SimpleProgressChecker` was ruled out by test, not by argument — loosening it
-  moved the failure interval and nothing else. **Next: log `/plan` and
-  `/cmd_vel` while it is stuck**, which distinguishes "no command issued" from
-  "command issued and the robot does not move".
+- [ ] **The robot cannot complete a detour after its route is blocked**, and
+  five parameter hypotheses have now been tested and disproven. What *is*
+  established: the robot is neither stuck nor oscillating. `/cmd_vel` runs at
+  19 Hz and is 94 % non-zero, the planner never fails and keeps emitting
+  228-pose paths, and ground truth shows 4.45 m travelled for 2.64 m net —
+  59 % efficiency with 7 reversals in 119 samples. It is **crawling**, at
+  0.0135 m/s against a 0.22 m/s limit, with `|vx| > 0.10` only 11 % of the
+  time. The recovery budget then runs out after ~2.5 m of a ~9 m detour.
+
+  A clean control isolates the cause. Same start, same corridor, blocker
+  present or not:
+
+  | Goal | Path vs goal direction | Result |
+  |---|---|---|
+  | east, no blocker | aligned | 4.5 m in **23 s** |
+  | east, blocker present | aligned | 4.5 m in **24 s** |
+  | southwest, blocker present | opposed (detour) | crawls, budget expires |
+
+  So the blocker is irrelevant and the corridor is fine — only path *shape*
+  matters.
+
+  `scripts/dwb_critic_probe.py` then read DWB's own `/evaluation` scores
+  instead of guessing further: the chosen trajectory averaged **`vx` = 0.000**
+  — pure rotation — while faster options existed, and `PathAlign` alone
+  penalised them by +2.77. It measures alignment of a point 0.1 m ahead, so
+  any forward motion worsens alignment while rotating in place improves it for
+  free. That is a complete mechanism, and it explains the control above.
+
+  It is not, however, a fix. Dropping `PathAlign` to 8.0 improved the
+  mechanism exactly as predicted (chosen `vx` 0.000 → 0.026, penalty 2.77 →
+  0.28) and made the **outcome worse** (1.6 m instead of 2.5 m, 20 recoveries
+  instead of 14): `BaseObstacle` simply became the binding constraint at 57 %
+  trajectory rejection. Tuning is not converging, and all five parameter
+  changes have been reverted. **Next is structural, not another parameter:
+  try RPP or MPPI instead of DWB for this robot.**
 - [x] ~~**Angled approaches to the passage are unreliable.**~~ Fixed by
   allowing reverse (`min_vel_x: -0.10`). 6/6 legs, 5 passages, 5 recoveries.
   Both stuck points had been at the ends of `wall_inner_a`, where a
