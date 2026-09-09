@@ -708,6 +708,67 @@ kept clear so `teleport_test.py` can run its whole sequence in place (its
 trajectory stays within 1.21 m of the origin, with 0.45 m of clearance to the
 nearest wall).
 
+### Controller choice: DWB to RPP
+
+The local controller is Regulated Pure Pursuit, not DWB. That swap is the one
+change in this project that came from *stopping* tuning rather than continuing
+it.
+
+DWB failed a specific case — completing a detour after its route was blocked
+mid-drive — and five separate parameter changes, each with a defensible
+derivation, moved nothing: the progress-checker window, allowing reverse, the
+local costmap size, the goal-direction critic weights, and `PathAlign` itself.
+Reading DWB's own `/evaluation` scores showed why. The chosen trajectory
+averaged `vx = 0.000` — pure rotation — and `PathAlign` alone penalised faster
+options by +2.77 while every other critic scored 0. `PathAlign` rewards
+aligning a point 0.1 m ahead with the path, so on a curving path any forward
+motion worsens alignment while rotating in place improves it for free.
+
+That is structural. Lowering `PathAlign` improved the metric exactly as
+predicted and made the outcome *worse*, because `BaseObstacle` simply became
+the binding constraint. RPP has no such critic — it steers toward a lookahead
+point on the path, so "rotate instead of drive" is not a scoring option at all.
+Its rotate-in-place is bounded: it fires once above a 45° heading error and
+ends when the error is inside it.
+
+Every test improved, including two that were open issues:
+
+| | DWB (best config) | RPP |
+|---|---|---|
+| Blocked detour completed | **no** | **yes**, 0.074 m error |
+| Detour recoveries | 14–20 | **3** |
+| Stress legs reached | 6 / 6 | 6 / 6 |
+| Stress passages | 5 | **6** |
+| Stress recoveries | 5 | **0** |
+| Worst clearance in the gap | 2.0 cm | **5.9 cm** |
+
+The clearance gain was not aimed for. It comes from
+`use_cost_regulated_linear_velocity_scaling`, which slows the robot as costmap
+cost rises, so it stops cutting as close. That closes the 2.0 cm item without a
+separate fix.
+
+Three parameters needed deriving rather than copying:
+
+**`lookahead_dist` 0.33 m, clamped to `[0.30, 0.60]`** — pure pursuit cuts
+corners by roughly half the lookahead. The tightest traversable gap is 0.90 m,
+so its half-width is 0.45 m and the margin past the 0.25 m robot radius is
+0.20 m. A 0.33 m lookahead cuts ~0.17 m, inside that. Velocity-scaled at
+`lookahead_time: 1.5` gives exactly 0.33 m at 0.22 m/s.
+
+**`regulated_linear_scaling_min_speed` 0.08** — the Nav2 default is **0.25,
+which is above this robot's 0.22 m/s limit**, so copying it would leave the
+curvature-based slowdown permanently inactive. It has to be below
+`desired_linear_vel` to do anything.
+
+**`inflation_cost_scaling_factor` 3.0** — must equal the costmap's own
+`cost_scaling_factor`. They are separate parameters in separate files and
+nothing checks that they agree; a mismatch converts cost to speed on the wrong
+curve.
+
+The DWB block is kept in `nav2_params.yaml` as `FollowPath_dwb_disabled`,
+along with the notes from the investigation. Switching back is renaming two
+blocks.
+
 ### Nav2 parameters are derived, not defaulted
 
 Three numbers in `config/nav2_params.yaml` come from this robot and this room
@@ -963,8 +1024,16 @@ intuitive fix; determinism was the useful one.
   numbers agree perfectly. It is the same fact this file already records from
   the SLAM work — odometry being self-consistent proves nothing — approached
   from the other side.
-- [ ] **The robot cannot complete a detour after its route is blocked**, and
-  five parameter hypotheses have now been tested and disproven. What *is*
+- [x] ~~**The robot cannot complete a detour after its route is blocked.**~~
+  Fixed by replacing DWB with Regulated Pure Pursuit — a structural change
+  after five parameter changes failed. The detour now completes: goal reached
+  at `(-4.469, -2.933)`, 0.074 m error, 3 recoveries instead of 14–20. See
+  [Controller choice](#controller-choice-dwb-to-rpp). The investigation that
+  led there is kept below, because the reasoning is the useful part.
+
+- [x] **How that was found — five disproven hypotheses.** Kept because the
+  method is worth more than the fix: every one of these was a defensible
+  derivation that the measurement rejected. What *was*
   established: the robot is neither stuck nor oscillating. `/cmd_vel` runs at
   19 Hz and is 94 % non-zero, the planner never fails and keeps emitting
   228-pose paths, and ground truth shows 4.45 m travelled for 2.64 m net —
@@ -996,17 +1065,19 @@ intuitive fix; determinism was the useful one.
   0.28) and made the **outcome worse** (1.6 m instead of 2.5 m, 20 recoveries
   instead of 14): `BaseObstacle` simply became the binding constraint at 57 %
   trajectory rejection. Tuning is not converging, and all five parameter
-  changes have been reverted. **Next is structural, not another parameter:
-  try RPP or MPPI instead of DWB for this robot.**
+  changes were reverted. The conclusion drawn at the time — **"next is
+  structural, not another parameter"** — is what led to
+  [swapping in RPP](#controller-choice-dwb-to-rpp), which fixed it on the
+  first attempt. The five failures are what made that call defensible rather
+  than a guess.
 - [x] ~~**Angled approaches to the passage are unreliable.**~~ Fixed by
   allowing reverse (`min_vel_x: -0.10`). 6/6 legs, 5 passages, 5 recoveries.
   Both stuck points had been at the ends of `wall_inner_a`, where a
   differential drive needs to back up before turning.
-- [ ] **Clearance is down to 2.0 cm.** The configuration that passes does so by
-  cutting much closer: 15.4 cm → 5.7 cm → 2.0 cm across the three runs, most of
-  it from the inflation change. Under half a map cell. Nothing collided, but
-  the obvious experiment — `inflation 0.35` *with* reverse — has not been run,
-  and it might buy back margin without giving up completion.
+- [x] ~~**Clearance is down to 2.0 cm.**~~ Now 5.9 cm, as a side effect of the
+  RPP switch rather than of the `inflation 0.35` experiment that was planned —
+  `use_cost_regulated_linear_velocity_scaling` slows the robot as costmap cost
+  rises, so it stops cutting as close. The planned experiment was never needed.
 - [ ] **`SimpleGoalChecker` reports success outside its own tolerance.** One
   leg finished 0.230 m from goal with `xy_goal_tolerance: 0.15`. `stateful:
   true` latches on first entry and the robot coasts out — tolerable at 0.16 m,
