@@ -150,7 +150,8 @@ class SlipMonitor(Node):
         self.aborts = 0
         self.last_abort = 0.0
         self.amcl_pose = None            # (x, y, z, w) 位置 + 四元数 z/w
-        self.amcl_hist = []              # [(t, pose)], 用于回溯到打滑之前
+        self.amcl_hist = []              # [(t, pose)], 固定回溯的兜底
+        self.slip_start_pose = None      # streak 由 0 变 1 那一帧的 AMCL 位姿
         self.recovery = None             # None | ('backup', 起点 odom, 起始时刻)
         self.reseeds = 0
 
@@ -188,14 +189,23 @@ class SlipMonitor(Node):
         self.amcl_hist = [h for h in self.amcl_hist if now - h[0] <= 15.0]
 
     def _preslip_pose(self):
-        """取打滑开始之前的 AMCL 位姿; 没有足够历史时退回当前值。"""
+        """
+        取打滑开始时的 AMCL 位姿。
+
+        首选 streak 起点那一帧记下的位姿 —— 那是车最后一次被判定为
+        正常行驶时的估计, 精确对应"打滑开始的瞬间"。
+        取不到时才退回固定回溯; 固定回溯会连打滑之前的真实位移一起丢掉
+        (实测丢了 0.24m), 所以只作兜底。
+        """
+        if self.slip_start_pose is not None:
+            return self.slip_start_pose, 'streak 起点'
         if not self.amcl_hist:
-            return None, False
+            return None, None
         cutoff = time.time() - PRESLIP_LOOKBACK_S
         old = [h for h in self.amcl_hist if h[0] <= cutoff]
         if old:
-            return old[-1][1], True
-        return self.amcl_hist[0][1], False
+            return old[-1][1], f'{PRESLIP_LOOKBACK_S:.0f}s 前(兜底)'
+        return self.amcl_hist[0][1], '历史最早(兜底, 可能不够旧)'
 
     def _recovery_tick(self):
         """中止后的恢复: 先倒车脱困并给 AMCL 位移, 再放大不确定度重新播种。"""
@@ -217,7 +227,7 @@ class SlipMonitor(Node):
         print(f'  [恢复] 已倒车 {moved:.2f} m{note}', flush=True)
 
     def _reseed_amcl(self):
-        pose, fresh = self._preslip_pose()
+        pose, src = self._preslip_pose()
         if pose is None:
             print('  [恢复] 收不到 /amcl_pose, 跳过重新播种', flush=True)
             return
@@ -234,9 +244,10 @@ class SlipMonitor(Node):
         m.pose.covariance[35] = RESEED_YAW_VAR
         self.initial_pub.publish(m)
         self.reseeds += 1
-        src = f'{PRESLIP_LOOKBACK_S:.0f}s 前' if fresh else '历史最早(可能不够旧)'
         print(f'  [恢复] 以 σ=0.5m 在 ({x:+.2f}, {y:+.2f}) 重新播种 AMCL '
-              f'—— 取自{src}的位姿, 因为打滑期间车并没有移动', flush=True)
+              f'—— 位姿取自 {src}, 因为打滑期间车并没有移动', flush=True)
+        # 用过就清掉, 下一次打滑要记新的起点
+        self.slip_start_pose = None
 
     def _abort_nav(self):
         """确认打滑后中止导航。失败不抛异常 —— 监视器不该反过来搞垮系统。"""
@@ -309,6 +320,11 @@ class SlipMonitor(Node):
         ratio = measured / expected if expected > 0 else 1.0
 
         if ratio < SLIP_RATIO:
+            if self.streak == 0:
+                # streak 由 0 变 1 的这一帧就是打滑的起点。
+                # 此刻的 AMCL 位姿即"车还在正常行驶时的最后一个位姿",
+                # 比按固定秒数回溯精确 —— 后者会把打滑前的真实位移一起丢掉。
+                self.slip_start_pose = self.amcl_pose
             self.streak += 1
             if self.streak >= CONFIRM_N:
                 self.events.append((t1, d_odom, measured, expected))

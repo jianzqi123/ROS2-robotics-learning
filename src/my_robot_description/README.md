@@ -34,8 +34,9 @@ hand-checking numbers that looked plausible but weren't.
 - **2D SLAM** with `slam_toolbox` (async, Ceres solver, loop closure enabled)
 - **Saved occupancy grid** (`maps/my_map.yaml` + `.pgm`)
 - **Autonomous navigation** with Nav2 — AMCL localization, NavFn global planner,
-  DWB local planner, dual costmaps — with every parameter derived from this
-  robot's geometry and this room's tightest passage
+  Regulated Pure Pursuit local controller, dual costmaps — with every parameter
+  derived from this robot's geometry and this room's tightest passage
+  (see [Controller choice](#controller-choice-dwb-to-rpp) for why not DWB)
 - **Headless mode** (`gazebo.launch.py headless:=true`) so the whole stack can
   be verified without a display
 - **Automated physics diagnostic** (`scripts/teleport_test.py`) that drives a
@@ -47,7 +48,8 @@ hand-checking numbers that looked plausible but weren't.
   from a deliberately wrong initial pose
 - **Wheel-slip detection** (`scripts/slip_monitor.py`) that catches the wheels
   turning while the robot is not moving, using `/scan` rather than the wheel
-  encoders that are lying
+  encoders that are lying — and on detection cancels the Nav2 goal, flags the
+  pose as untrustworthy, and reseeds AMCL from before the slip
 
 ## Tech Stack
 
@@ -1033,12 +1035,11 @@ intuitive fix; determinism was the useful one.
   pre-slip pose, and backs the robot clear — 0.092 m from ground truth
   afterwards, against 0.574 m when seeded from the drifted estimate. See
   [Slip detection](#slip-detection).
-- [ ] **The pre-slip lookback is a fixed 3 s, which discards real motion.**
-  Seeding from 3 s back assumes the robot was already stuck then; in the
-  verification it had actually driven 0.24 m in that window, so that much
-  genuine displacement is thrown away. Scan matching absorbed it — 0.092 m
-  final error — but the right seed is the pose at the moment the detector's
-  streak *began*, which the monitor already knows and does not yet record.
+- [x] ~~**The pre-slip lookback is a fixed 3 s, which discards real motion.**~~
+  The monitor now records the AMCL pose at the frame where the detection streak
+  goes 0 → 1, which *is* the moment slip began. The seed moved from 0.24 m
+  behind the true stuck pose to 0.02 m from it; final localization error
+  0.092 m → 0.084 m. The fixed lookback remains as a fallback.
 
   In the original failure three position sources disagreed completely: ground truth
   `(3.00, 2.57)` — physically wedged under `table1` — against `/odom`
@@ -1117,7 +1118,22 @@ intuitive fix; determinism was the useful one.
   RPP switch rather than of the `inflation 0.35` experiment that was planned —
   `use_cost_regulated_linear_velocity_scaling` slows the robot as costmap cost
   rises, so it stops cutting as close. The planned experiment was never needed.
-- [ ] **`SimpleGoalChecker` reports success outside its own tolerance.** One
-  leg finished 0.230 m from goal with `xy_goal_tolerance: 0.15`. `stateful:
-  true` latches on first entry and the robot coasts out — tolerable at 0.16 m,
-  much less so at 0.23 m. Worth re-checking against `stateful: false`.
+- [x] ~~**`SimpleGoalChecker` reports success outside its own tolerance.**~~
+  It does not. `stateful: false` was tested and changed nothing (0.216 m
+  either way), so the latching hypothesis was wrong. Tracking AMCL's distance
+  to the goal throughout an approach showed a **minimum of 0.127 m** — inside
+  the 0.15 m tolerance — ending at 0.159 m. The checker is honest about the
+  pose it is given; the ground-truth figure is three legitimate contributions
+  stacked:
+
+  | | |
+  |---|---|
+  | tolerance itself | ≤ 0.15 m |
+  | coasting after the action terminates | ~0.03 m |
+  | AMCL's own error | ~0.05 m |
+  | **worst case** | **~0.23 m**, against 0.216 m measured |
+
+  The practical consequence is a rule, not a fix: to land within X of ground
+  truth, set the tolerance to X minus coast minus localization error. Expecting
+  a stricter checker to do it is the wrong model. `stateful` reverted to `true`
+  since changing it bought nothing.
