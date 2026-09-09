@@ -41,14 +41,19 @@
 
 import argparse
 import math
+import re
+import subprocess
 import sys
 import time
 
 import rclpy
+from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 
+from action_msgs.srv import CancelGoal
 from geometry_msgs.msg import Twist
+from nav2_msgs.action import NavigateToPose
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan
 
@@ -66,6 +71,24 @@ CONFIRM_N = 3           # 连续 N 次才报警, 避开单帧抖动
 BOX1_CONTACT_X = 2.5 - 0.2
 CONTACT_TOL = 0.15
 
+# --abort 用: 确认打滑后取消 Nav2 目标, 冷却期内不重复取消。
+# 取消后车会停下, odom 不再前进, 检测器自然不再触发, 所以冷却主要是
+# 防止取消请求在动作真正终止前被连发。
+ABORT_COOLDOWN_S = 5.0
+
+# --verify-abort 用的隐形障碍物。
+#   高 0.12m: 光束高度 h(r) = 0.1822 - r*tan(0.337 度) = 0.1822 - 0.00588r,
+#   要降到 0.12 需要 r = 10.6m, 而房间对角线才 12.8m 且这条航线只有 2.5m
+#   —— 也就是说这个物体在整条路上都在光束之下, /scan 完全看不见它,
+#   代价地图上不存在, 规划器会直接穿过去。
+#   但它挡得住车: 轮子半径 0.05 爬不上 0.12 的台阶, 底盘前面板占
+#   z∈[0.05,0.15], 必然撞上。
+# 这正是本项目反复讲的"2D 地图是一个切片"的最坏情况:
+# 传感器看不见的障碍物, 只有打滑检测能发现。
+LOW_OBSTACLE_POSE = (0.0, 1.3)
+LOW_OBSTACLE_SIZE = (0.4, 0.4, 0.12)
+ABORT_GOAL = (0.0, 2.5)
+
 
 def yaw_of(q):
     return math.atan2(2.0 * (q.w * q.z + q.x * q.y),
@@ -78,19 +101,42 @@ def wrap_pi(a):
 
 class SlipMonitor(Node):
 
-    def __init__(self, verbose=True):
+    def __init__(self, verbose=True, abort=False):
         super().__init__('slip_monitor')
         self.verbose = verbose
+        self.abort_enabled = abort
         self.odom = None                 # (t, x, y, yaw)
         self.hist = []                   # [(t, ranges, odom), ...]
         self.streak = 0
         self.events = []                 # 报警记录 (t, d_odom, 实测, 预期)
         self.last_eval = 0.0
+        self.aborts = 0
+        self.last_abort = 0.0
 
         self.create_subscription(Odometry, '/odom', self._on_odom, 20)
         self.create_subscription(LaserScan, '/scan', self._on_scan,
                                  qos_profile_sensor_data)
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        # goal_id 与 stamp 全零 = 取消该动作服务器上的所有目标,
+        # 所以不需要持有目标句柄, 监视器可以独立于发目标的那个进程运行。
+        self.cancel_cli = self.create_client(
+            CancelGoal, '/navigate_to_pose/_action/cancel_goal')
+        self.nav = ActionClient(self, NavigateToPose, 'navigate_to_pose')
+
+    def _abort_nav(self):
+        """确认打滑后中止导航。失败不抛异常 —— 监视器不该反过来搞垮系统。"""
+        now = time.time()
+        if now - self.last_abort < ABORT_COOLDOWN_S:
+            return
+        self.last_abort = now
+        if not self.cancel_cli.service_is_ready():
+            if self.verbose:
+                print('  [中止] 取消服务不可用, Nav2 在跑吗?', flush=True)
+            return
+        self.cancel_cli.call_async(CancelGoal.Request())
+        self.aborts += 1
+        print('  [中止] 已请求取消 Nav2 目标 —— 里程计已不可信, '
+              '继续走只会把 AMCL 一起带偏', flush=True)
 
     def _on_odom(self, msg):
         t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
@@ -148,6 +194,8 @@ class SlipMonitor(Node):
                           f'扫描变化 {measured * 100:.1f} cm  '
                           f'预期 {expected * 100:.1f} cm  '
                           f'比值 {ratio:.2f}', flush=True)
+                if self.abort_enabled:
+                    self._abort_nav()
         else:
             self.streak = 0
             if self.verbose:
@@ -167,8 +215,6 @@ class SlipMonitor(Node):
 
 def ground_truth(retries=3):
     """仅用于自检时确认车是真的停住了; 检测器本身不依赖它。取不到返回 None。"""
-    import re
-    import subprocess
     for _ in range(retries):
         try:
             out = subprocess.run(['gz', 'model', '-m', 'my_robot', '-p'],
@@ -235,24 +281,145 @@ def verify(node):
     return ok
 
 
+def _gz(args, timeout=20):
+    try:
+        return subprocess.run(args, capture_output=True, text=True,
+                              timeout=timeout).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ''
+
+
+def spawn_low_obstacle(name='low_block'):
+    """放一个雷达看不见但挡得住车的矮块。尺寸依据见文件顶部常量注释。"""
+    sx, sy, sz = LOW_OBSTACLE_SIZE
+    sdf = ('<?xml version="1.0"?><sdf version="1.8">'
+           f'<model name="{name}"><static>true</static><link name="l">'
+           f'<collision name="c"><geometry><box><size>{sx} {sy} {sz}</size>'
+           '</box></geometry></collision>'
+           f'<visual name="v"><geometry><box><size>{sx} {sy} {sz}</size>'
+           '</box></geometry></visual></link></model></sdf>')
+    return 'true' in _gz([
+        'gz', 'service', '-s', '/world/my_world/create',
+        '--reqtype', 'gz.msgs.EntityFactory', '--reptype', 'gz.msgs.Boolean',
+        '--timeout', '5000',
+        '--req', f"sdf: '{sdf}', pose: {{position: "
+                 f"{{x: {LOW_OBSTACLE_POSE[0]}, y: {LOW_OBSTACLE_POSE[1]}, "
+                 f"z: {sz / 2}}}}}"])
+
+
+def remove_low_obstacle(name='low_block'):
+    _gz(['gz', 'service', '-s', '/world/my_world/remove',
+         '--reqtype', 'gz.msgs.Entity', '--reptype', 'gz.msgs.Boolean',
+         '--timeout', '5000', '--req', f'name: "{name}", type: MODEL'])
+
+
+def verify_abort(node):
+    """
+    验证抢先中止: Nav2 正常导航途中撞上一个雷达看不见的矮块,
+    检测器应当检出打滑并取消目标, 而不是任由车继续空转。
+
+    为什么这个场景才算数: 障碍物在 /scan 里不存在, 所以代价地图上也不存在,
+    规划器会一路规划穿过去, 局部避障也不会绕。整条 Nav2 链路都认为
+    "前方畅通" —— 只有打滑检测能发现车其实已经顶住了。
+    这正是"2D 地图是一个切片"的最坏情况。
+    """
+    print('=' * 66)
+    print('自检: Nav2 导航中撞上隐形矮块, 检测器应中止目标')
+    print('=' * 66)
+    remove_low_obstacle()
+    if not node.nav.wait_for_server(timeout_sec=20.0):
+        print('  navigate_to_pose 没起来 —— 需要先跑 nav2.launch.py')
+        return False
+
+    gt0 = ground_truth()
+    print(f'  起点真值 {gt0}')
+    if not spawn_low_obstacle():
+        print('  矮块投放失败')
+        return False
+    h, = (LOW_OBSTACLE_SIZE[2],)
+    print(f'  已放置 {LOW_OBSTACLE_SIZE[0]}x{LOW_OBSTACLE_SIZE[1]}x{h} m 矮块 '
+          f'于 {LOW_OBSTACLE_POSE}  (光束在此高度之上, /scan 看不见)')
+
+    g = NavigateToPose.Goal()
+    g.pose.header.frame_id = 'map'
+    g.pose.pose.position.x = float(ABORT_GOAL[0])
+    g.pose.pose.position.y = float(ABORT_GOAL[1])
+    g.pose.pose.orientation.w = 1.0
+    print(f'  发目标 {ABORT_GOAL} —— 直线穿过矮块所在位置', flush=True)
+
+    send = node.nav.send_goal_async(g)
+    rclpy.spin_until_future_complete(node, send, timeout_sec=20.0)
+    hd = send.result()
+    if hd is None or not hd.accepted:
+        print('  目标未被接受')
+        remove_low_obstacle()
+        return False
+
+    fut = hd.get_result_async()
+    end = time.time() + 90.0
+    while rclpy.ok() and time.time() < end and not fut.done():
+        rclpy.spin_once(node, timeout_sec=0.1)
+
+    status = fut.result().status if fut.done() else None
+    gt1 = ground_truth()
+    remove_low_obstacle()
+    node.cmd_pub.publish(Twist())
+
+    # 动作状态: 4=SUCCEEDED 5=CANCELED 6=ABORTED
+    name = {4: 'SUCCEEDED', 5: 'CANCELED', 6: 'ABORTED'}.get(status, str(status))
+    print()
+    print(f'  打滑检出      {len(node.events)} 次')
+    print(f'  发出中止请求  {node.aborts} 次')
+    print(f'  动作最终状态  {name}')
+    print(f'  最终真值      {gt1}')
+
+    # 预期停在矮块南侧: 块中心 y=1.3, 半宽 0.2, 车身半长 0.2 -> y≈0.9
+    contact_y = LOW_OBSTACLE_POSE[1] - LOW_OBSTACLE_SIZE[1] / 2 - 0.2
+    if gt1:
+        dy = abs(gt1[1] - contact_y)
+        print(f'  预期接触点 y={contact_y:.2f}, 实测 {gt1[1]:.3f}, '
+              f'差 {dy * 1000:.0f} mm')
+    else:
+        dy = None
+        print('  取不到真值, 接触点无法确认')
+
+    detected = len(node.events) > 0
+    aborted = node.aborts > 0 and status in (5, 6)
+    stopped = dy is not None and dy < 0.35
+    print()
+    print(f'  检出打滑:     {"是" if detected else "否 —— 漏报"}')
+    print(f'  目标被中止:   {"是" if aborted else "否"}')
+    print(f'  停在矮块处:   {"是" if stopped else ("否" if dy is not None else "无法确认")}')
+    ok = detected and aborted and stopped
+    print(f'  判定: {"通过" if ok else "未通过"}')
+    return ok
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--verify', action='store_true', help='自己开去撞墙做自检')
+    ap.add_argument('--verify-abort', action='store_true',
+                    help='验证抢先中止(需要 nav2 在跑)')
+    ap.add_argument('--abort', action='store_true',
+                    help='检出打滑时取消 Nav2 目标')
     ap.add_argument('--quiet', action='store_true', help='只打印报警')
     args = ap.parse_args()
 
     rclpy.init()
-    node = SlipMonitor(verbose=not args.quiet)
+    # --verify-abort 本身就是在验证中止, 所以隐含开启 --abort
+    node = SlipMonitor(verbose=not args.quiet,
+                       abort=args.abort or args.verify_abort)
     ok = True
     try:
-        if args.verify:
+        if args.verify or args.verify_abort:
             # 等第一帧扫描和里程计
             end = time.time() + 15
             while node.odom is None and time.time() < end:
                 rclpy.spin_once(node, timeout_sec=0.1)
-            ok = verify(node)
+            ok = verify_abort(node) if args.verify_abort else verify(node)
         else:
-            print('监视中 (Ctrl-C 退出) ...')
+            mode = '监视 + 检出即中止' if args.abort else '仅监视'
+            print(f'{mode} (Ctrl-C 退出) ...')
             rclpy.spin(node)
     except KeyboardInterrupt:
         pass

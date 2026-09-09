@@ -401,6 +401,33 @@ come to rest at `x = 2.3`:
 | Wedged against `box1`, 14 s | **15 detections**, scan change 0.0 cm against 12.7 cm predicted |
 | Final ground-truth pose | `x = 2.2989` against the 2.30 contact point — **1.1 mm** |
 
+**Wired into Nav2.** With `--abort` the monitor cancels the active
+`navigate_to_pose` goal the moment slip is confirmed, using the action's cancel
+service with a zero goal id — so it cancels whatever is running without needing
+to hold the goal handle, and can run as an independent process.
+
+`--verify-abort` tests this against the case that matters most, and the test
+scenario is the point: a **0.12 m block that `/scan` cannot see**. The beam
+leaves the LiDAR at 0.182 m and descends 0.337°, so it only drops below 0.12 m
+at `(0.1822 − 0.12) / tan(0.337°)` = **10.6 m** — further than this room's
+diagonal. The block is therefore absent from the costmap, the planner routes
+straight through it, and the local planner has nothing to avoid. **Every part
+of Nav2 believes the path is clear.** But a 0.12 m step is unclimbable for a
+0.05 m wheel and strikes a chassis whose front face spans 0.05–0.15 m, so the
+robot wedges and the wheels spin.
+
+| Check | Result |
+|---|---|
+| False alarms while driving to it | **0** over 5 evaluations |
+| Slip detected | 1 (scan change **0.0 cm** against 13.6 cm predicted) |
+| Action final status | **CANCELED** — Nav2 did not report success |
+| Stopping point | `y = 0.899` against a predicted contact at 0.90 — **1 mm** |
+
+The number worth keeping is the odometry error at the moment of abort:
+**0.213 m**. The failure this was built for accumulated ~9 m before anything
+noticed, and AMCL followed it. Catching it two orders of magnitude earlier is
+the whole value.
+
 Scope, stated rather than implied: this detects *translational* slip only.
 Under pure rotation the scan change depends on the environment's angular
 structure, with no clean analytic expectation, so the monitor abstains when the
@@ -908,17 +935,26 @@ intuitive fix; determinism was the useful one.
   the origin, ground truth answering) exists because of it. Left open as a
   standing reminder: a measurement is only as trustworthy as the check that the
   thing being measured is the only one running.
-- [ ] **Wheel slip destroys localization, and Nav2 reports success anyway.**
-  In that run three position sources disagreed completely: ground truth
+- [ ] **After an abort, nothing tells the system its localization is suspect.**
+  ~~Wheel slip destroys localization, and Nav2 reports success anyway.~~ The
+  detection and the abort are done — the part below records why they were
+  needed, and what still is not handled.
+
+  In the original failure three position sources disagreed completely: ground truth
   `(3.00, 2.57)` — physically wedged under `table1` — against `/odom`
   `(8.26, 6.72)`, a point *outside* a room spanning `x ∈ [−5, 5]`,
   `y ∈ [−4, 4]`. Roughly 9 m of odometry accumulated while the wheels spun
   against an obstacle, exactly the failure this file documents from the SLAM
   work. AMCL's motion model followed it to `(-4.46, -2.88)` and the action then
   reported SUCCEEDED 8.5 m from the goal — success in AMCL's hallucination, not
-  in the room. **Detection now exists** — `scripts/slip_monitor.py`, see
-  [Slip detection](#slip-detection). Wiring it into Nav2 as a preemptive abort
-  is the remaining work.
+  in the room. **Detected and now acted on**: `scripts/slip_monitor.py --abort`
+  cancels the goal on confirmed slip, verified against an obstacle `/scan`
+  cannot see, with odometry error at abort of 0.213 m against the ~9 m that
+  went unnoticed here. See [Slip detection](#slip-detection).
+
+  Still open in this area: the abort stops the robot but does not tell the rest
+  of the system that localization is now suspect. AMCL keeps whatever drift it
+  absorbed, and nothing triggers relocalization.
 
   The earlier version of this entry proposed detecting slip by comparing
   commanded velocity against `/joint_states`. **That does not work here.**
