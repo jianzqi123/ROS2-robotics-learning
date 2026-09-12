@@ -22,6 +22,10 @@ setup(
         (os.path.join('share', package_name, 'rviz'), glob('rviz/*.rviz')),
         (os.path.join('share', package_name, 'maps'),
             glob('maps/*.yaml') + glob('maps/*.pgm')),
+        # 诊断脚本装进 share, 这样 launch 能按绝对路径起它们,
+        # 也方便从任何目录直接 python3 <share路径>/xxx.py 跑。
+        (os.path.join('share', package_name, 'scripts'),
+            glob('scripts/*.py') + glob('scripts/*.sh')),
         ('share/' + package_name, ['package.xml']),
     ],
     install_requires=['setuptools'],

@@ -35,7 +35,7 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, ExecuteProcess
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
@@ -53,6 +53,7 @@ def generate_launch_description():
 
     map_yaml = LaunchConfiguration('map')
     use_rviz = LaunchConfiguration('rviz')
+    use_slip_guard = LaunchConfiguration('slip_guard')
 
     # map_server 的 yaml_filename 必须是绝对路径, 所以在这里覆盖
     # nav2_params.yaml 里那个占位值(参数列表里靠后的字典优先)。
@@ -136,6 +137,19 @@ def generate_launch_description():
         ),
     ]
 
+    # 打滑守护。默认开启 —— 一个会悄悄把定位搞坏还报告"到达目标"的系统,
+    # 比一个偶尔主动停下来的系统危险得多。实测 0 误报(自由行驶 25 次判定),
+    # 检出时里程计误差 0.213m, 而不装它的那次故障积累了约 9m 才被发现。
+    #
+    # 它不是 Node() 而是 ExecuteProcess: 脚本放在 scripts/ 而不是 python 包里,
+    # 没有 entry_point, 所以直接按 share 下的绝对路径跑。
+    slip_guard = ExecuteProcess(
+        cmd=['python3', os.path.join(pkg_share, 'scripts', 'slip_monitor.py'),
+             '--abort', '--quiet'],
+        output='screen',
+        condition=IfCondition(use_slip_guard),
+    )
+
     rviz = Node(
         package='rviz2',
         executable='rviz2',
@@ -153,8 +167,12 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'rviz', default_value='true',
             description='是否同时启动 RViz'),
+        DeclareLaunchArgument(
+            'slip_guard', default_value='true',
+            description='打滑守护: 检出即取消目标并恢复定位'),
         *localization_nodes,
         *navigation_nodes,
         *lifecycle_managers,
+        slip_guard,
         rviz,
     ])

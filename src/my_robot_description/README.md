@@ -406,6 +406,27 @@ come to rest at `x = 2.3`:
 | Wedged against `box1`, 14 s | **15 detections**, scan change 0.0 cm against 12.7 cm predicted |
 | Final ground-truth pose | `x = 2.2989` against the 2.30 contact point — **1.1 mm** |
 
+**Runs by default.** `nav2.launch.py` starts the monitor with `--abort`
+(`slip_guard:=false` turns it off). It is on by default because a system that
+silently corrupts its own localization and then reports success is worse than
+one that occasionally stops on its own: the failure this guards against went
+9 m before anything noticed.
+
+Verified as launched, not just standalone — same invisible-obstacle scenario,
+with the guard started by the launch file rather than by hand:
+
+| | |
+|---|---|
+| `/slip_detected` | 1 × `true` |
+| Goal status | **CANCELED** |
+| Reseed | at `(+0.04, +0.90)`, from the streak start |
+| Backed clear | 0.30 m, ground truth `y` 0.90 → **0.600** |
+| AMCL vs ground truth | **0.102 m** |
+
+And it does not interfere with normal operation: the full passage stress test
+re-run with the guard enabled still passes 6/6 with 0 recoveries, and the guard
+produced **zero false triggers** across the whole run.
+
 **Wired into Nav2.** With `--abort` the monitor cancels the active
 `navigate_to_pose` goal the moment slip is confirmed, using the action's cancel
 service with a zero goal id — so it cancels whatever is running without needing

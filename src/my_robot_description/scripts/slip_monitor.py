@@ -98,6 +98,11 @@ BACKUP_DIST = 0.30       # m, 略大于 update_min_d, 保证 AMCL 至少更新�
 BACKUP_SPEED = 0.10      # m/s, 与 DWB 时期的倒车限幅一致
 BACKUP_TIMEOUT_S = 8.0
 
+# 取消是异步的: 请求发出后控制器还会再发几百毫秒的 /cmd_vel。
+# 如果这时监视器已经开始发倒车指令, 两个发布者同时写同一个话题,
+# 谁生效不确定。等一下再动。
+ABORT_GRACE_S = 1.5
+
 # 用打滑开始之前的那个 AMCL 位姿去播种, 不能用当前的。
 # 这一点是实测撞出来的: 第一版拿当前估计播种, 结果播种后 AMCL 与真值
 # 差 0.574m —— 打滑期间 odom 虚进了 0.22m, AMCL 的运动模型跟着漂,
@@ -212,7 +217,13 @@ class SlipMonitor(Node):
         if self.recovery is None or self.odom is None:
             return
         kind, o0, t0 = self.recovery
-        if kind != 'backup':
+        if kind == 'wait':
+            # 宽限期内什么都不发, 让被取消的目标彻底收场
+            if time.time() - t0 < ABORT_GRACE_S:
+                return
+            self.recovery = ('backup', self.odom, time.time())
+            return
+        if kind != 'backup' or o0 is None:
             return
         moved = math.hypot(self.odom[1] - o0[1], self.odom[2] - o0[2])
         timeout = time.time() - t0 > BACKUP_TIMEOUT_S
@@ -269,8 +280,9 @@ class SlipMonitor(Node):
         # 先播种再倒车: AMCL 会把倒车位移从修正后的位姿开始积分。
         # 反过来做的话, 倒车这一段就是从错误位姿出发算的。
         self._reseed_amcl()
-        if self.recovery is None and self.odom is not None:
-            self.recovery = ('backup', self.odom, time.time())
+        if self.recovery is None:
+            # 先进 wait 态等控制器停嘴, 到点再转 backup。
+            self.recovery = ('wait', None, time.time())
 
     def _on_odom(self, msg):
         t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
