@@ -60,6 +60,7 @@ import time
 
 import rclpy
 from rclpy.action import ActionClient
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import (QoSDurabilityPolicy, QoSHistoryPolicy, QoSProfile,
                        QoSReliabilityPolicy, qos_profile_sensor_data)
@@ -102,6 +103,13 @@ BACKUP_TIMEOUT_S = 8.0
 # 如果这时监视器已经开始发倒车指令, 两个发布者同时写同一个话题,
 # 谁生效不确定。等一下再动。
 ABORT_GRACE_S = 1.5
+
+# 仿真没起来时的提示。
+# 只跑 nav2.launch.py 而忘了 gazebo.launch.py 时, nav2 的表现是无限刷
+#   Invalid frame ID "odom" ... frame does not exist
+# 这句话技术上准确, 但没说出可操作的诊断 —— 新手不会知道它等于"仿真没起"。
+# 守护本来就订阅着 /scan 和 /odom, 由它把这句话讲清楚最自然, 不用多起进程。
+NO_DATA_WARN_S = 12.0
 
 # 用打滑开始之前的那个 AMCL 位姿去播种, 不能用当前的。
 # 这一点是实测撞出来的: 第一版拿当前估计播种, 结果播种后 AMCL 与真值
@@ -159,6 +167,9 @@ class SlipMonitor(Node):
         self.slip_start_pose = None      # streak 由 0 变 1 那一帧的 AMCL 位姿
         self.recovery = None             # None | ('backup', 起点 odom, 起始时刻)
         self.reseeds = 0
+        self.started = time.time()
+        self.scans = 0
+        self.warned_no_data = False
 
         self.create_subscription(Odometry, '/odom', self._on_odom, 20)
         self.create_subscription(LaserScan, '/scan', self._on_scan,
@@ -184,6 +195,30 @@ class SlipMonitor(Node):
         # 恢复动作用定时器驱动, 不能写在订阅回调里 —— 在回调里跑阻塞的
         # 行驶循环会把执行器卡住, 连 /scan 都收不到, 检测器自己就瞎了。
         self.create_timer(0.05, self._recovery_tick)
+        self.create_timer(2.0, self._preflight_tick)
+
+    def _preflight_tick(self):
+        """起来一段时间还没数据, 就把"仿真没起"这句话直接说出来。"""
+        if self.warned_no_data or (self.scans > 0
+                                   and self.odom is not None):
+            return
+        if time.time() - self.started < NO_DATA_WARN_S:
+            return
+        self.warned_no_data = True
+        missing = []
+        if self.scans == 0:
+            missing.append('/scan')
+        if self.odom is None:
+            missing.append('/odom')
+        print(f'  [!] 启动 {NO_DATA_WARN_S:.0f} 秒仍未收到 {" 和 ".join(missing)}。',
+              flush=True)
+        print('      最可能的原因: 仿真没有启动。先在另一个终端跑', flush=True)
+        print('        ros2 launch my_robot_description gazebo.launch.py',
+              flush=True)
+        print('      不起仿真的话, odom 坐标系不存在, Nav2 会一直刷',
+              flush=True)
+        print('      \'Invalid frame ID "odom" ... frame does not exist\','
+              ' 且目标永远无法执行。', flush=True)
 
     def _on_amcl(self, msg):
         p = msg.pose.pose
@@ -290,6 +325,7 @@ class SlipMonitor(Node):
         self.odom = (t, p.position.x, p.position.y, yaw_of(p.orientation))
 
     def _on_scan(self, msg):
+        self.scans += 1
         if self.odom is None:
             return
         t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
@@ -617,8 +653,12 @@ def main():
             mode = '监视 + 检出即中止' if args.abort else '仅监视'
             print(f'{mode} (Ctrl-C 退出) ...')
             rclpy.spin(node)
-    except KeyboardInterrupt:
-        # 监视模式按 Ctrl-C 是正常收工, 不是失败
+    except (KeyboardInterrupt, ExternalShutdownException):
+        # 收到信号是正常收工, 不是失败。
+        # 两种都要抓: Ctrl-C 给 SIGINT -> KeyboardInterrupt;
+        # launch 在 SIGINT 超时后升级到 SIGTERM, 那时 rclpy 的信号处理器
+        # 已经关掉上下文, rclpy.spin() 抛的是 ExternalShutdownException。
+        # 只抓前者的话, 被 SIGTERM 收走时仍然会吐一整段 traceback。
         ok = True
     finally:
         # Ctrl-C 时 rclpy 的信号处理器可能已经把上下文关掉了, 这时再 publish

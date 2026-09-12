@@ -174,7 +174,12 @@ ros2 service call /slam_toolbox/serialize_map \
 ### Autonomous navigation
 
 Once a map is saved, `slam.launch.py` is no longer needed — Nav2 localizes
-against the saved grid instead of building a new one:
+against the saved grid instead of building a new one. **Both terminals are
+required** — without the simulator there is no `odom` frame, and Nav2 will
+simply repeat `Invalid frame ID "odom" … frame does not exist` forever while
+goals never execute. The slip guard says so in plain terms after 12 s of
+receiving no `/scan` or `/odom`, because that log line is accurate but does not
+name the actual cause.
 
 ```bash
 # Terminal 1
