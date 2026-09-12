@@ -7,7 +7,9 @@ Nav2 导航栈: AMCL 定位 + 全局/局部代价地图 + 规划 + 控制。
     # 终端2 导航(自带 RViz)
     ros2 launch my_robot_description nav2.launch.py
 
-在 RViz 里用工具栏的 "2D Goal Pose" 点一个目标点即可。
+在 RViz 里用工具栏的 "2D Goal Pose" 点一个目标点即可
+(那是 RViz 自带的 SetGoal 工具, 发到 /goal_pose;
+ 由 scripts/goal_relay.py 转成 NavigateToPose 动作 —— 原因见下)。
 初始位姿不用点 —— nav2_params.yaml 里已经设了 set_initial_pose,
 因为机器人在 gazebo.launch.py 里固定从原点出生。
 
@@ -162,6 +164,18 @@ def generate_launch_description():
         condition=IfCondition(use_slip_guard),
     )
 
+    # 目标中继: 把 RViz 标准 SetGoal 工具发的 /goal_pose 转成动作调用。
+    # 为什么不用官方的 GoalTool + "Navigation 2" 面板: 那个面板还要连
+    # follow_waypoints 和 smoother_server, 而本项目不起这两个节点, 面板
+    # 加载不成功就会刷屏。删掉面板则点目标点毫无反应 —— 因为工具只记位姿,
+    # 调动作的是面板。Nav2 里没有任何东西订阅 /goal_pose, 所以这一环得自己接。
+    # 只在开 RViz 时才需要, 所以跟着 rviz 参数一起开关。
+    goal_relay = ExecuteProcess(
+        cmd=['python3', os.path.join(pkg_share, 'scripts', 'goal_relay.py')],
+        output='screen',
+        condition=IfCondition(use_rviz),
+    )
+
     rviz = Node(
         package='rviz2',
         executable='rviz2',
@@ -186,5 +200,6 @@ def generate_launch_description():
         *navigation_nodes,
         *lifecycle_managers,
         slip_guard,
+        goal_relay,
         rviz,
     ])

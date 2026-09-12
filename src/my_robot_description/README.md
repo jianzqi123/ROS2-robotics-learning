@@ -111,6 +111,7 @@ my_robot_description/
 │   ├── nav2_test.py             # unattended navigation + AMCL convergence test
 │   ├── slip_monitor.py          # wheel-slip detection from /scan
 │   ├── dwb_critic_probe.py      # reads /evaluation: which critic vetoes speed
+│   ├── goal_relay.py            # /goal_pose -> NavigateToPose, for RViz goals
 │   ├── pitch_beam_test.py       # how chassis pitch re-aims /scan, measured
 │   └── kill_stack.sh            # stop sim + nav2, verified to zero
 ├── demo_map.gif                 # SLAM mapping run (Demo section above)
@@ -866,6 +867,26 @@ empty. It needs `Transient Local` as well.
 `rviz/nav2.rviz` is that file with four changes: the three panels, the bumper
 display and the Realsense group removed, and `RobotModel` enabled with a
 durability that matches its publisher.
+
+Removing those panels broke goal setting, which is worth spelling out because
+it is not obvious: `nav2_rviz_plugins/GoalTool` only *records* a pose — the
+`Navigation 2` panel is what calls the `NavigateToPose` action. Delete the
+panel and clicking a goal does nothing at all, a worse problem than the log
+spam it was removed to fix.
+
+The panel is not worth restoring: it also needs `follow_waypoints`
+(`waypoint_follower`) and `smoother_server`, two nodes this project does not
+use, and adding them to satisfy a panel inverts the rule that every node should
+be justifiable. So the config uses RViz's own `rviz_default_plugins/SetGoal`
+tool, which publishes to `/goal_pose` — and since nothing in Nav2 subscribes to
+that topic (`ros2 topic info /goal_pose` reports it does not exist),
+`scripts/goal_relay.py` closes the gap in about fifty lines.
+
+Verified: one publish to `/goal_pose` produces exactly one accepted goal — a
+single unique `goal_id` on the action status topic — and the robot reaches it.
+`(-3.0, -2.5)` requested, `(-2.942, -2.452)` by ground truth, 0.075 m.
+`bt_navigator` logs `Begin navigating` twice per goal on this path; the status
+topic shows one goal id, so that is duplicate logging, not a duplicate request.
 
 One warning survives and is harmless:
 
