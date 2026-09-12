@@ -77,8 +77,10 @@ scan plane can ever see of a solid object. What separates them visually is not
 the outline but the *fill*: the boxes read as hollow because their interiors
 are **unknown**, never observed behind the near face, while `platform`'s
 interior is marked **free**. Something drove rays across the top of a 0.25 m
-obstacle that a −0.337° beam leaving the LiDAR at 0.182 m should never clear.
-See [Known Issues](#known-issues--next-steps).
+obstacle that a −0.337° beam leaving the LiDAR at 0.182 m should never clear —
+and it turned out to be the chassis pitching nose-*up* under acceleration,
+measured at −1.344° against a −1.337° prediction. See
+[Known Issues](#known-issues--next-steps).
 
 An [earlier build](demo_lidar.gif) — before the room world and SLAM — shows the
 same robot in the original obstacle world with the raw 16-beam point cloud in
@@ -107,6 +109,7 @@ my_robot_description/
 │   ├── nav2_test.py             # unattended navigation + AMCL convergence test
 │   ├── slip_monitor.py          # wheel-slip detection from /scan
 │   ├── dwb_critic_probe.py      # reads /evaluation: which critic vetoes speed
+│   ├── pitch_beam_test.py       # how chassis pitch re-aims /scan, measured
 │   └── kill_stack.sh            # stop sim + nav2, verified to zero
 ├── demo_map.gif                 # SLAM mapping run (Demo section above)
 ├── demo_lidar.gif               # earlier build: raw 16-beam point cloud
@@ -971,17 +974,31 @@ intuitive fix; determinism was the useful one.
   `map_slice_check.py`. Scale anisotropy 0.00 %, both inner spans exact.
 - [x] ~~**Re-record `demo_map.gif`.**~~ Done — the GIF is now the −0.337° run
   that produced the committed map.
-- [ ] **`platform`'s interior is marked free, not unknown.** Every other solid
-  object shows an unknown interior (`box1` 74.8 %, `crates` 59.2 %) because
-  nothing ever sees behind the near face. `platform` reads 0.0 % unknown, so
-  rays crossed it. A −0.337° beam leaving the LiDAR at 0.182 m cannot clear a
-  0.25 m obstacle at any range, so the resting geometry does not explain it.
-  The likely mechanism is the pitch envelope working in the other direction:
-  under acceleration the chassis rotates nose-**up** onto the rear caster, up
-  to 1.337°, which puts the beam at `+1.000° + 1.337° = +2.337°` from a LiDAR
-  lifted to 0.1878 m — clearing 0.25 m beyond `(0.25 − 0.1878) / tan(2.337°)`
-  = **1.52 m**. Testable by logging `/odom` pitch against `/scan` returns in
-  the platform's bearing; until then it is a hypothesis, not a finding.
+- [x] ~~**`platform`'s interior is marked free, not unknown.**~~ Confirmed by
+  measurement, not left as a hypothesis. `scripts/pitch_beam_test.py` parks the
+  robot 1.78 m east of `platform` facing it, then applies a velocity step while
+  streaming Gazebo's ground-truth pitch and the forward `/scan` range:
+
+  | | at rest | accelerating |
+  |---|---|---|
+  | chassis pitch | **+1.337°** (nose-down) | **−1.344°** (nose-up) |
+  | forward range | 1.78 m — sees the step | **3.88 m** — clears it, hits the west wall |
+
+  The predicted nose-up angle was −1.337°, the full caster-to-caster envelope;
+  measured −1.344°, **0.007° off**. The beam clears a 0.25 m obstacle past
+  1.52 m and the robot was at 1.78 m, so it should clear — and the range jumps
+  by 2.1 m exactly when the pitch flips. `acc_lim_x: 1.0` was already set from
+  this reasoning; it is now a measured constraint rather than a predicted one.
+
+  What made it a puzzle: every other solid object shows an unknown interior
+  (`box1` 74.8 %, `crates` 59.2 %) because nothing ever sees behind the near
+  face, while `platform` reads 0.0 % unknown — rays crossed it. The resting
+  geometry forbids that, which is what forced the pitch envelope to be
+  considered in the other direction: under acceleration the chassis rotates
+  nose-**up** onto the *rear* caster, putting the beam at
+  `+1.000° + 1.337° = +2.337°` from a LiDAR lifted to 0.1878 m, clearing 0.25 m
+  beyond `(0.25 − 0.1878) / tan(2.337°)` = **1.52 m**. The measurement above
+  turned that from a hypothesis into a finding.
 - [ ] **`wall_completeness` is 87–99 %, not 100 %.** The gaps are occlusion by
   `shelf` and `cylinder1` (see [Map quality](#map-quality)), so nothing is
   broken — but Nav2 will plan against those gaps, and a costmap that thinks
