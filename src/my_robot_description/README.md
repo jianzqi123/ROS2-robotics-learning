@@ -855,8 +855,33 @@ stream is invisible. The config also subscribes to
 `/mobile_base/sensors/bumper_pointcloud`, a TurtleBot topic that does not exist
 here.
 
-`rviz/nav2.rviz` is that file with those three panels and the bumper display
-removed, and nothing else changed. The 2D Goal Pose tool is unaffected — it
+It also ships `Realsense` camera displays, and leaves `RobotModel` disabled —
+so the robot itself is invisible and you infer its position from the laser
+points. Enabling it is not just a checkbox: its description topic was set to
+`Volatile`, while `robot_state_publisher` publishes `/robot_description` as
+`TRANSIENT_LOCAL` — latched once at startup. A volatile subscriber joining
+after that moment receives nothing, so the display would tick on and stay
+empty. It needs `Transient Local` as well.
+
+`rviz/nav2.rviz` is that file with four changes: the three panels, the bumper
+display and the Realsense group removed, and `RobotModel` enabled with a
+durability that matches its publisher.
+
+One warning survives and is harmless:
+
+```
+amcl: New subscription discovered on topic '/particle_cloud',
+      requesting incompatible QoS. Last incompatible policy: RELIABILITY
+```
+
+AMCL publishes `BEST_EFFORT` and the display requests `BEST_EFFORT`, so this
+looked like a real mismatch. It is a startup transient: `ParticleCloudDisplay`
+derives from `MessageFilterDisplay`, which subscribes before the saved QoS is
+applied. The display reports `Status: Ok` once running and the swarm renders —
+a converged cloud is only a few pixels wide at map zoom, which is why it is
+easy to mistake for absent. I predicted this warning would disappear when the
+borrowed panels were removed; it did not, and that prediction was inference
+stated as if it were measurement. The 2D Goal Pose tool is unaffected — it
 lives in `Tools`, not `Panels`, which is why goals still worked while the
 panels were failing. Dropping the file also dropped the `nav2_bringup`
 dependency, which existed only to borrow it.

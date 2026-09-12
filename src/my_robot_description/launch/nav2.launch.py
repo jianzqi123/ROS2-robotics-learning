@@ -53,7 +53,13 @@ def generate_launch_description():
     #     "smoother_server service not available / Failed to load plugins.
     #      Retrying..." —— 刷了三分钟, 真正的报错会被淹没在里面。
     #   - 还订阅着 /mobile_base/sensors/bumper_pointcloud, 那是 TurtleBot 的话题。
-    # 这份是从官方那份裁出来的: 去掉那三个面板和 bumper 显示, 其余保留。
+    #   - Realsense 相机组也是 TurtleBot 的, 本项目没有相机。
+    # 这份是从官方那份裁出来的, 改动仅四处:
+    #   去掉三个面板、去掉 bumper 与 Realsense 显示、开启 RobotModel。
+    # RobotModel 那处不只是勾选: 它的描述话题原本是 Volatile, 而
+    # robot_state_publisher 发 /robot_description 用的是 TRANSIENT_LOCAL
+    # (启动时发一次然后锁存) —— Volatile 订阅者晚于那一刻加入就什么都收不到,
+    # 即使勾上也是空的。所以同时把 Durability 改成 Transient Local。
     # 2D Goal Pose 工具(nav2_rviz_plugins/GoalTool)在 Tools 段, 不受影响。
     rviz_config = os.path.join(pkg_share, 'rviz', 'nav2.rviz')
 
