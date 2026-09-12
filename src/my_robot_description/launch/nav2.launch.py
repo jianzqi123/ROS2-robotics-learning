@@ -43,13 +43,19 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     pkg_share = get_package_share_directory('my_robot_description')
-    nav2_share = get_package_share_directory('nav2_bringup')
 
     params_file = os.path.join(pkg_share, 'config', 'nav2_params.yaml')
     default_map = os.path.join(pkg_share, 'maps', 'my_map.yaml')
-    # 直接用 nav2 自带的视图: 它带 Navigation 2 面板和 2D Goal Pose 工具,
-    # 手写一份等价的 .rviz 只是把三百行 YAML 抄一遍。
-    rviz_config = os.path.join(nav2_share, 'rviz', 'nav2_default_view.rviz')
+    # 本项目自己的视图。曾经直接用 nav2 自带的 nav2_default_view.rviz,
+    # 但那份配置假设官方那套完整节点都在:
+    #   - Navigation 2 / Selector / Docking 三个面板要连 smoother_server 等,
+    #     而本项目刻意没起它们, 于是 RViz 每 5 秒刷一次
+    #     "smoother_server service not available / Failed to load plugins.
+    #      Retrying..." —— 刷了三分钟, 真正的报错会被淹没在里面。
+    #   - 还订阅着 /mobile_base/sensors/bumper_pointcloud, 那是 TurtleBot 的话题。
+    # 这份是从官方那份裁出来的: 去掉那三个面板和 bumper 显示, 其余保留。
+    # 2D Goal Pose 工具(nav2_rviz_plugins/GoalTool)在 Tools 段, 不受影响。
+    rviz_config = os.path.join(pkg_share, 'rviz', 'nav2.rviz')
 
     map_yaml = LaunchConfiguration('map')
     use_rviz = LaunchConfiguration('rviz')

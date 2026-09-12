@@ -618,11 +618,25 @@ def main():
             print(f'{mode} (Ctrl-C 退出) ...')
             rclpy.spin(node)
     except KeyboardInterrupt:
-        pass
+        # 监视模式按 Ctrl-C 是正常收工, 不是失败
+        ok = True
     finally:
-        node.cmd_pub.publish(Twist())
-        node.destroy_node()
-        rclpy.shutdown()
+        # Ctrl-C 时 rclpy 的信号处理器可能已经把上下文关掉了, 这时再 publish
+        # 会抛 "publisher's context is invalid", 进程带 exit code 1 退出,
+        # launch 就报 "process has died" —— 看着像出事了, 其实只是没收好尾。
+        # 停车指令是"尽力而为": 发得出就发, 发不出说明上下文没了,
+        # 那车本来也已经因为节点消失而收不到指令了。
+        try:
+            if rclpy.ok():
+                node.cmd_pub.publish(Twist())
+        except Exception:
+            pass
+        try:
+            node.destroy_node()
+        except Exception:
+            pass
+        if rclpy.ok():
+            rclpy.shutdown()
     sys.exit(0 if ok else 1)
 
 

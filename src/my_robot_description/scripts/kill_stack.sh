@@ -26,7 +26,10 @@
 # 结论: 在这个环境里做的任何测量都不作数。测量之前先确认被测系统唯一。
 
 SELF=$$
-PAT='/opt/ros/jazzy/lib/nav2|ros_gz_bridge|robot_state_publisher|gz_tools_vendor|(^|[[:space:]])gz sim'
+# slip_monitor 必须在列: 它现在由 nav2.launch.py 默认启动, 而它的命令行是
+# "python3 .../slip_monitor.py", 不含上面任何一个 nav2/gz 关键字 ——
+# 漏掉它的后果是残留的监视器会和新起的那个抢 /cmd_vel。
+PAT='/opt/ros/jazzy/lib/nav2|ros_gz_bridge|robot_state_publisher|gz_tools_vendor|(^|[[:space:]])gz sim|slip_monitor\.py'
 
 for _ in 1 2 3 4; do
   PIDS=$(pgrep -f "$PAT" | grep -v "^${SELF}$" | tr '\n' ' ')

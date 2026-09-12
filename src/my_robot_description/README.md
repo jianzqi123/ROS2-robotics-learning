@@ -99,7 +99,9 @@ my_robot_description/
 ├── config/
 │   ├── slam_params.yaml         # slam_toolbox tuning
 │   └── nav2_params.yaml         # Nav2 tuning — every value derived, see Design Notes
-├── rviz/slam.rviz               # RViz layout (map / scan / TF / robot)
+├── rviz/
+│   ├── slam.rviz                # RViz layout for mapping (map / scan / TF / robot)
+│   └── nav2.rviz                # RViz layout for navigation — see below for why not nav2_bringup's
 ├── maps/                        # saved occupancy grid
 │   ├── my_map.yaml
 │   └── my_map.pgm
@@ -826,6 +828,33 @@ curve.
 The DWB block is kept in `nav2_params.yaml` as `FollowPath_dwb_disabled`,
 along with the notes from the investigation. Switching back is renaming two
 blocks.
+
+### The RViz config is ours, not `nav2_bringup`'s
+
+`nav2.launch.py` originally loaded `nav2_bringup/rviz/nav2_default_view.rviz`,
+on the reasoning that hand-writing 300 lines of equivalent YAML was wasted
+effort. A session with the GUI showed what that borrowed file assumes.
+
+Its `Navigation 2`, `Selector` and `Docking` panels connect to servers this
+project deliberately does not start — `smoother_server` among them. The panels
+never load, and RViz retries forever:
+
+```
+smoother_server service not available
+Failed to load plugins. Retrying...
+```
+
+That repeated every five seconds for the length of the session. The cost is not
+the noise itself but what the noise hides: a real error scrolling past in that
+stream is invisible. The config also subscribes to
+`/mobile_base/sensors/bumper_pointcloud`, a TurtleBot topic that does not exist
+here.
+
+`rviz/nav2.rviz` is that file with those three panels and the bumper display
+removed, and nothing else changed. The 2D Goal Pose tool is unaffected — it
+lives in `Tools`, not `Panels`, which is why goals still worked while the
+panels were failing. Dropping the file also dropped the `nav2_bringup`
+dependency, which existed only to borrow it.
 
 ### Nav2 parameters are derived, not defaulted
 

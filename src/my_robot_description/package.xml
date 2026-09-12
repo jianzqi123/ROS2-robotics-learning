@@ -34,7 +34,8 @@
   <!-- nav2.launch.py 起的节点。只声明真正用到的这几个,
        不声明 navigation2 元包 —— 那会连 route_server / docking_server
        一起拖进来,而本项目的 launch 刻意没有启动它们。
-       nav2_bringup 只用来取 rviz/nav2_default_view.rviz。 -->
+       曾经依赖 nav2_bringup 只为取它的 rviz 配置, 现在本项目自带
+       rviz/nav2.rviz, 那个依赖已经去掉。 -->
   <exec_depend>nav2_amcl</exec_depend>
   <exec_depend>nav2_controller</exec_depend>
   <exec_depend>nav2_planner</exec_depend>
@@ -43,7 +44,9 @@
   <exec_depend>nav2_costmap_2d</exec_depend>
   <exec_depend>nav2_navfn_planner</exec_depend>
   <exec_depend>dwb_core</exec_depend>
-  <exec_depend>nav2_bringup</exec_depend>
+  <exec_depend>nav2_regulated_pure_pursuit_controller</exec_depend>
+  <!-- rviz/nav2.rviz 用到 GoalTool 和 ParticleCloud 两个显示插件 -->
+  <exec_depend>nav2_rviz_plugins</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
