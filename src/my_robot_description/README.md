@@ -1,14 +1,18 @@
 # My Robot Description
 
 A differential-drive mobile robot with a 16-beam 3D LiDAR, built from scratch in
-ROS 2 Jazzy and Gazebo Harmonic, running 2D SLAM with `slam_toolbox`.
+ROS 2 Jazzy and Gazebo Harmonic: 2D SLAM with `slam_toolbox`, then autonomous
+navigation on the resulting map with Nav2.
 
 ## Overview
 
 This project models a mobile robot end to end — mechanical structure (URDF),
 physics (mass/inertia, collision, ground contact), differential-drive control,
-a 16-beam 3D LiDAR — simulates it in a purpose-built indoor world, and closes
-the loop by producing an occupancy grid map with `slam_toolbox`.
+a 16-beam 3D LiDAR — simulates it in a purpose-built indoor world, builds an
+occupancy grid of that world with `slam_toolbox`, and then navigates
+autonomously on it: AMCL localization, global and local costmaps, path
+planning, trajectory following, and a slip detector that catches the one
+failure mode none of those layers report.
 
 Built as part of self-directed ROS 2 study, guided by Prof. Liu Shuang's
 suggestion to start with ROS/Linux and work up to a multi-beam LiDAR robot
@@ -54,9 +58,39 @@ hand-checking numbers that looked plausible but weren't.
 ## Tech Stack
 
 ROS 2 Jazzy · Gazebo Harmonic (gz-sim) · URDF/SDF · `ros_gz_bridge` ·
-`slam_toolbox` · `nav2_map_server` · `nav2_lifecycle_manager` · RViz2
+`slam_toolbox` · `nav2_amcl` · `nav2_planner` (NavFn) · `nav2_controller`
+(Regulated Pure Pursuit) · `nav2_bt_navigator` · `nav2_behaviors` ·
+`nav2_map_server` · `nav2_lifecycle_manager` · RViz2
 
 ## Demo
+
+### Navigating to three goals
+
+![Nav2 navigating to three goals](demo_nav2.gif)
+
+Three goals clicked in RViz, back to back, at roughly 7× real time. Everything
+after each click is the robot's own: AMCL localizing against the saved map,
+NavFn planning a route, and Regulated Pure Pursuit driving it. The pale band
+wrapping every obstacle is the inflation layer, the green speckle riding with
+the robot is AMCL's particle cloud, and the thin magenta line is the current
+plan.
+
+The first goal is the one worth watching. The robot starts at the room's centre
+and the goal is the south-west pocket at `(-3.0, -2.5)` — but `wall_inner_a`
+runs straight across the line between them, so the planner has to commit to a
+detour, and it takes the wall's east end rather than the 1.00 m gap at its west
+end. **That case is why this project isn't running DWB.** DWB reached the goal
+in open space but stalled on exactly this geometry, printing `No valid
+trajectories out of 419!` — a line that sat in my logs 28 times before I grepped
+for it. Five plausible fixes were tried and all five were disproved by their
+own tests; the write-up is in [Controller choice](#controller-choice-dwb-to-rpp).
+
+The second and third goals are less dramatic on purpose: a long diagonal across
+the open floor, then a run north that passes directly under `overhead_beam` —
+which never appears in the map at all, for the reason the mapping run below
+makes visible.
+
+### Mapping
 
 ![SLAM mapping run](demo_map.gif)
 
@@ -114,6 +148,7 @@ my_robot_description/
 │   ├── goal_relay.py            # /goal_pose -> NavigateToPose, for RViz goals
 │   ├── pitch_beam_test.py       # how chassis pitch re-aims /scan, measured
 │   └── kill_stack.sh            # stop sim + nav2, verified to zero
+├── demo_nav2.gif                # Nav2 driving to three RViz goals (Demo section above)
 ├── demo_map.gif                 # SLAM mapping run (Demo section above)
 ├── demo_lidar.gif               # earlier build: raw 16-beam point cloud
 ├── package.xml                  # dependencies — keep in sync with the launch files
@@ -316,12 +351,12 @@ caster clearance was supposed to buy.
 > written down, so it could not be checked. Nothing about the sensor needed
 > explaining; the measurement did.
 >
-> **`demo_map.gif` still shows the old geometry.** `maps/my_map.pgm` has been
-> regenerated at the current `−0.337°`, but the GIF was recorded during the
-> earlier `−0.909°` run and has not been re-shot. The script reads beam
-> geometry from the *current* URDF and cannot tell what a saved `.pgm` was
-> built with, so it prints both and leaves the comparison to you — check them
-> against each other before quoting either.
+> **The script cannot tell you which geometry a saved map came from.** It reads
+> beam elevation from the *current* URDF, but a `.pgm` on disk carries no record
+> of the URDF that produced it. So it prints both and leaves the comparison to
+> you. `maps/my_map.pgm` and `demo_map.gif` are both the `−0.337°` run and agree
+> with each other today — but that is a fact about this commit, not a property
+> the script can enforce. Re-shoot the GIF whenever the map is regenerated.
 
 ### Navigation
 
